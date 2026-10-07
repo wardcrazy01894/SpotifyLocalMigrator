@@ -9,13 +9,20 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 | Playlist | Songs | Added | Kept local | Result |
 |---|---|---|---|---|
-| Pry | 112 | 107 | 5 | https://open.spotify.com/playlist/034PA7UMN27PrxIpRDnI9Q |
+| Pry | 112 | 107 | 5 | https://open.spotify.com/playlist/034PA7UMN27PrxIpRDnI9Q — `verify` COMPLETE 2026-10-07 |
 
 ## In progress
 
 | Playlist | Songs | Status |
 |---|---|---|
-| iPhone | 3262 | day-by-day. Each session: `python3 migrate.py -w iPhone match --limit 300` → `build` → review `work/iphone/flagged_<date>.csv` → `approve ...` → `build`. 2026-10-07: 290 searched, 193 added, 97 flagged awaiting answers. Spotify search quota resets ~12:43 daily. |
+| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day, ~300 songs/session (Spotify search quota ≈400/day, resets ~12:43). 2026-10-07: 290 searched, 247 on Spotify, 5 keep-local (carried from Pry), 38 open flags: 14 marked recheck (Kygo remixes etc., re-search with `research`), 15 group-B "different version" declined for now, 9 nothing-found pending a decision. |
+
+Daily loop: `python3 migrate.py -w iPhone match --limit 300` → `build` → review `work/iphone/flagged_<date>.csv` →
+`approve --pos ... --keep-local ... --recheck ...` → `build` → `verify`.
+
+Standing rules:
+- A decision (approve / keep local) made for a song in one playlist applies to the same song in every playlist (`work/approvals.json`).
+- A playlist is only done when `verify` says COMPLETE: source count == Spotify tracks in the new playlist + local files dragged in by hand.
 
 ## Queued (do not start without approval)
 
