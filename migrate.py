@@ -171,7 +171,7 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
             if e.code == 429:
                 wait = int(e.headers.get("Retry-After", "2")) + 1
                 if wait > 120:
-                    raise RateLimited(wait)
+                    raise RateLimited(wait) from None
                 print(f"\n  rate limited; sleeping {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
