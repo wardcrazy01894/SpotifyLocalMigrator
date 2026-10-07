@@ -15,7 +15,7 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 | Playlist | Songs | Status |
 |---|---|---|
-| iPhone | 3262 | matched 290/3262, paused on a 24 h Spotify rate limit (2026-10-07); resume with `python3 migrate.py -w iPhone match` |
+| iPhone | 3262 | day-by-day. Each session: `python3 migrate.py -w iPhone match --limit 300` → `build` → review `work/iphone/flagged_<date>.csv` → `approve ...` → `build`. 2026-10-07: 290 searched, 193 added, 97 flagged awaiting answers. Spotify search quota resets ~12:43 daily. |
 
 ## Queued (do not start without approval)
 

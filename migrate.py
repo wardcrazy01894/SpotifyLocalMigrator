@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import datetime
 import hashlib
 import http.server
 import json
@@ -169,6 +170,8 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 wait = int(e.headers.get("Retry-After", "2")) + 1
+                if wait > 120:
+                    raise RateLimited(wait)
                 print(f"\n  rate limited; sleeping {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
@@ -180,6 +183,12 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
         except (urllib.error.URLError, TimeoutError):
             time.sleep(2 * (attempt + 1))
     raise RuntimeError(f"Giving up on {method} {url}")
+
+
+class RateLimited(Exception):
+    def __init__(self, wait_s: int):
+        super().__init__(f"Spotify rate limit; retry after {wait_s / 3600:.1f} h")
+        self.wait_s = wait_s
 
 
 def api_get(path: str, **params) -> dict:
@@ -420,19 +429,29 @@ def cmd_match(args) -> None:
     cache: dict[str, dict] = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     items = src["items"]
     todo = [i for i in items if i["is_local"] and str(i["pos"]) not in cache]
-    print(f"{len(items)} items; {len(todo)} local files still to match")
+    limit = getattr(args, "limit", None)
+    if limit:
+        todo = todo[:limit]
+    remaining = sum(1 for i in items if i["is_local"] and str(i["pos"]) not in cache)
+    batch = datetime.date.today().isoformat()
+    print(f"{len(items)} items; {remaining} local files still to match; doing {len(todo)} now (batch {batch})")
     t0 = time.time()
+    stopped: str | None = None
     for n, it in enumerate(todo, 1):
         try:
             cands = search_candidates(it)
+        except RateLimited as e:
+            stopped = str(e)
+            break
         except RuntimeError as e:
             print(f"\n  search failed for #{it['pos']} {it['title']}: {e}", file=sys.stderr)
             continue
         if not cands:
-            cache[str(it["pos"])] = {"verdict": "no_candidates", "score": 0, "uri": None}
+            cache[str(it["pos"])] = {"verdict": "no_candidates", "score": 0, "uri": None, "batch": batch}
         else:
             order = {"match": 5, "duration_mismatch": 4, "no_duration": 4, "title_variant": 3, "artist_mismatch": 2, "no_match": 1}
             best = max((evaluate(it, c) for c in cands), key=lambda r: (order[r["verdict"]], r["score"]))
+            best["batch"] = batch
             cache[str(it["pos"])] = best
         if n % 10 == 0 or n == len(todo):
             cache_path.write_text(json.dumps(cache, indent=1))
@@ -441,7 +460,9 @@ def cmd_match(args) -> None:
         time.sleep(0.05)
     print()
     cache_path.write_text(json.dumps(cache, indent=1))
-    write_reports(wd, src, cache)
+    if stopped:
+        print(f"STOPPED EARLY: {stopped}. Progress is saved; rerun match later.", file=sys.stderr)
+    write_reports(wd, src, cache, batch=batch)
 
 
 def fmt_dur(ms: int | None) -> str:
@@ -449,7 +470,9 @@ def fmt_dur(ms: int | None) -> str:
     return f"{ms // 60000}:{(ms // 1000) % 60:02d}"
 
 
-def write_reports(wd: Path, src: dict, cache: dict) -> dict:
+def write_reports(wd: Path, src: dict, cache: dict, batch: str | None = None) -> dict:
+    """Print the breakdown; write flagged.csv (all open flags) and, if batch is
+    given, flagged_<batch>.csv with only that batch's open flags."""
     counts: dict[str, int] = {}
     rows: list[dict] = []
     for it in src["items"]:
@@ -463,10 +486,11 @@ def write_reports(wd: Path, src: dict, cache: dict) -> dict:
         elif m.get("approved"):
             v = "approved_" + v
         counts[v] = counts.get(v, 0) + 1
-        if v == "match" or v.startswith("approved_"):
+        if v in ("match", "not_searched", "keep_local") or v.startswith("approved_"):
             continue
         rows.append(
             {
+                "batch": m.get("batch", ""),
                 "reason": v,
                 "pos": it["pos"],
                 "title": it["title"],
@@ -484,14 +508,29 @@ def write_reports(wd: Path, src: dict, cache: dict) -> dict:
             }
         )
     rows.sort(key=lambda r: (r["reason"], r["pos"]))
+    fields = list(rows[0].keys()) if rows else ["reason"]
     with (wd / "flagged.csv").open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["reason"])
+        w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
-    summary = {"total": len(src["items"]), "counts": counts}
+    if batch:
+        with (wd / f"flagged_{batch}.csv").open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            w.writerows([r for r in rows if r["batch"] == batch])
+    searched = sum(v for k, v in counts.items() if k not in ("not_searched", "already_spotify"))
+    will_add = counts.get("match", 0) + sum(v for k, v in counts.items() if k.startswith("approved_"))
+    summary = {
+        "total": len(src["items"]),
+        "searched": searched,
+        "not_searched": counts.get("not_searched", 0),
+        "in_playlist_after_build": will_add + counts.get("already_spotify", 0),
+        "open_flags": len(rows),
+        "counts": counts,
+    }
     (wd / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary, indent=1))
-    print(f"Flagged tracks written to {wd / 'flagged.csv'}")
+    print(f"Open flags: {wd / 'flagged.csv'}" + (f"; this batch: {wd / f'flagged_{batch}.csv'}" if batch else ""))
     return summary
 
 
@@ -534,7 +573,7 @@ def cmd_report(args) -> None:
     wd = current_work()
     src = json.loads((wd / "source.json").read_text())
     cache = json.loads((wd / "matches.json").read_text())
-    write_reports(wd, src, cache)
+    write_reports(wd, src, cache, batch=getattr(args, "batch", None))
 
 
 # ----------------------------------------------------------------------------
@@ -626,14 +665,18 @@ def main() -> None:
     e = sub.add_parser("export")
     e.add_argument("playlist", help='playlist URL/URI/id, or "name:<playlist name>"')
     e.set_defaults(fn=cmd_export)
-    sub.add_parser("match").set_defaults(fn=cmd_match)
+    mt = sub.add_parser("match")
+    mt.add_argument("--limit", type=int, help="search at most this many new songs (daily quota is roughly 400)")
+    mt.set_defaults(fn=cmd_match)
 
     ap = sub.add_parser("approve", help="approve flagged tracks for adding, or mark them keep-local")
     ap.add_argument("--reasons", help="comma list: duration_mismatch,title_variant,artist_mismatch,no_match")
     ap.add_argument("--pos", help="comma list of source positions (from flagged.csv)")
     ap.add_argument("--keep-local", help="comma list of positions to never add")
     ap.set_defaults(fn=cmd_approve)
-    sub.add_parser("report", help="re-print the breakdown and rewrite flagged.csv").set_defaults(fn=cmd_report)
+    rp = sub.add_parser("report", help="re-print the breakdown and rewrite flagged.csv")
+    rp.add_argument("--batch", help="also write flagged_<batch>.csv for this batch date (YYYY-MM-DD)")
+    rp.set_defaults(fn=cmd_report)
 
     def build_opts(sp):
         sp.add_argument("--name", help="name for the new playlist")
