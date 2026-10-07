@@ -459,6 +459,9 @@ def cmd_match(args) -> None:
             print(f"  {n}/{len(todo)}  ({rate:.1f}/s)", end="\r", flush=True)
         time.sleep(0.05)
     print()
+    carried = apply_global(src, cache)
+    if carried:
+        print(f"  {carried} decision(s) carried over from earlier playlists")
     cache_path.write_text(json.dumps(cache, indent=1))
     if stopped:
         print(f"STOPPED EARLY: {stopped}. Progress is saved; rerun match later.", file=sys.stderr)
@@ -491,7 +494,7 @@ def write_reports(wd: Path, src: dict, cache: dict, batch: str | None = None) ->
         rows.append(
             {
                 "batch": m.get("batch", ""),
-                "reason": v,
+                "reason": v + (" (recheck)" if m.get("recheck") else ""),
                 "pos": it["pos"],
                 "title": it["title"],
                 "artist": it["artist"],
@@ -537,19 +540,72 @@ def write_reports(wd: Path, src: dict, cache: dict, batch: str | None = None) ->
 # ----------------------------------------------------------------------------
 # Approve / report (the human-in-the-loop part)
 # ----------------------------------------------------------------------------
+GLOBAL_APPROVALS = WORK_ROOT / "approvals.json"
+
+
 def wanted(m: dict | None) -> bool:
     """Should this local track's candidate go into the new playlist?"""
     return bool(m) and bool(m.get("uri")) and (m["verdict"] == "match" or m.get("approved") is True)
 
 
-def cmd_approve(args) -> None:
-    """Mark flagged tracks as approved (added on next build/sync) or keep-local."""
+def song_key(it: dict) -> str:
+    return f"{norm_title(it['title'])}|{norm(it['artist'])}|{(it['duration_ms'] or 0) // 1000}"
+
+
+def load_global() -> dict:
+    return json.loads(GLOBAL_APPROVALS.read_text()) if GLOBAL_APPROVALS.exists() else {}
+
+
+def record_global(it: dict, m: dict, decision: str, playlist: str) -> None:
+    """Standing rule: a decision made in one playlist applies to the same song everywhere."""
+    g = load_global()
+    g[song_key(it)] = {
+        "decision": decision,  # approve | keep_local
+        "uri": m.get("uri") if decision == "approve" else None,
+        "title": it["title"],
+        "artist": it["artist"],
+        "from_playlist": playlist,
+    }
+    GLOBAL_APPROVALS.write_text(json.dumps(g, indent=1))
+
+
+def apply_global(src: dict, cache: dict) -> int:
+    g = load_global()
+    n = 0
+    for it in src["items"]:
+        m = cache.get(str(it["pos"]))
+        d = g.get(song_key(it))
+        if not m or not d or m["verdict"] == "match" or m.get("approved") is not None or m.get("keep_local"):
+            continue
+        if d["decision"] == "keep_local":
+            m["keep_local"] = True
+            m["approved"] = False
+        else:
+            m["approved"] = True
+            if d.get("uri") and d["uri"] != m.get("uri"):
+                m["uri"] = d["uri"]
+                m["title"] = m.get("title", "") + "  (uri carried from " + d["from_playlist"] + ")"
+        m["carried_from"] = d["from_playlist"]
+        n += 1
+    return n
+
+
+def load_state() -> tuple[Path, dict, dict]:
     wd = current_work()
     src = json.loads((wd / "source.json").read_text())
-    cache = json.loads((wd / "matches.json").read_text())
+    cache = json.loads((wd / "matches.json").read_text()) if (wd / "matches.json").exists() else {}
+    if apply_global(src, cache):
+        (wd / "matches.json").write_text(json.dumps(cache, indent=1))
+    return wd, src, cache
+
+
+def cmd_approve(args) -> None:
+    """Mark flagged tracks as approved (added on next build) / keep-local / recheck."""
+    wd, src, cache = load_state()
     reasons = set(filter(None, (args.reasons or "").split(",")))
     positions = {int(x) for x in filter(None, (args.pos or "").split(","))}
     keep = {int(x) for x in filter(None, (args.keep_local or "").split(","))}
+    recheck = {int(x) for x in filter(None, (getattr(args, "recheck", None) or "").split(","))}
     changed = 0
     for it in src["items"]:
         m = cache.get(str(it["pos"]))
@@ -558,21 +614,95 @@ def cmd_approve(args) -> None:
         if it["pos"] in keep:
             m["approved"] = False
             m["keep_local"] = True
+            m.pop("recheck", None)
+            record_global(it, m, "keep_local", src["name"])
+            changed += 1
+        elif it["pos"] in recheck:
+            m["recheck"] = True
             changed += 1
         elif m["verdict"] != "match" and (m["verdict"] in reasons or it["pos"] in positions) and m.get("uri"):
             if not m.get("keep_local"):
                 m["approved"] = True
+                m.pop("recheck", None)
+                record_global(it, m, "approve", src["name"])
                 changed += 1
                 print(f"  approve #{it['pos']}: {it['title']} — {it['artist']}  ->  {m['title']} — {m['artist']}")
     (wd / "matches.json").write_text(json.dumps(cache, indent=1))
-    print(f"{changed} entries updated. Run 'build --update <playlist>' (or 'build' for a new playlist) to apply.")
+    print(f"{changed} entries updated. Run 'build' to apply.")
     cmd_report(args)
 
 
+def cmd_research(args) -> None:
+    """Re-search one flagged song with a hand-written query (e.g. 'I See Fire Kygo remix')."""
+    wd, src, cache = load_state()
+    it = src["items"][args.pos]
+    m = cache.get(str(it["pos"]), {})
+    print(f"#{it['pos']}: {it['title']} — {it['artist']} {fmt_dur(it['duration_ms'])}")
+    if args.pick:
+        t = api_get(f"/tracks/{args.pick.split(':')[-1]}", market="US")
+        r = evaluate(it, t)
+        r["approved"] = True
+        r["batch"] = m.get("batch")
+        cache[str(it["pos"])] = r
+        record_global(it, r, "approve", src["name"])
+        print(f"  picked: {r['title']} — {r['artist']} {fmt_dur(r['duration_ms'])} ({r['verdict']})")
+    else:
+        res = api_get("/search", q=args.query, type="track", limit=10, market="US")
+        cands = sorted((evaluate(it, t) for t in res.get("tracks", {}).get("items", [])), key=lambda r: -r["score"])
+        for r in cands[:8]:
+            print(f"  {r['verdict']:17} {r['score']:3}  {r['title']} — {r['artist']} [{r['album']}] {fmt_dur(r['duration_ms'])}  {r['uri']}")
+        if cands and (args.take or cands[0]["verdict"] == "match"):
+            best = cands[0]
+            best["batch"] = m.get("batch")
+            if best["verdict"] != "match":
+                best["approved"] = True
+                record_global(it, best, "approve", src["name"])
+            cache[str(it["pos"])] = best
+            print(f"  -> stored {best['title']} ({best['verdict']}{', approved' if best.get('approved') else ''})")
+        elif cands:
+            print("  -> nothing stored (no exact match; use --take to accept the top result, or --pick <uri>)")
+    cache[str(it["pos"])].pop("recheck", None) if cache.get(str(it["pos"]), {}).get("verdict") == "match" or cache.get(str(it["pos"]), {}).get("approved") else None
+    (wd / "matches.json").write_text(json.dumps(cache, indent=1))
+
+
+def cmd_verify(args) -> None:
+    """Completeness check: source count == Spotify tracks in new playlist + local files to drag in."""
+    wd, src, cache = load_state()
+    rp = wd / "result.json"
+    if not rp.exists():
+        sys.exit("No playlist built yet for this source.")
+    res = json.loads(rp.read_text())
+    live = paged(f"{API}/playlists/{res['playlist_id']}/items", {"limit": 50, "fields": "next,items(is_local,item(uri))"})
+    live_spotify = sum(1 for x in live if not x.get("is_local"))
+    live_local = sum(1 for x in live if x.get("is_local"))
+    expected_spotify, _ = desired_uris(src, cache, False)
+    keep_local = [it for it in src["items"] if cache.get(str(it["pos"]), {}).get("keep_local")]
+    unresolved = [
+        it for it in src["items"]
+        if it["is_local"] and not wanted(cache.get(str(it["pos"]))) and not cache.get(str(it["pos"]), {}).get("keep_local")
+    ]
+    searched = sum(1 for it in src["items"] if str(it["pos"]) in cache)
+    print(f"Source '{src['name']}': {len(src['items'])} songs ({searched} searched so far)")
+    print(f"New playlist '{res['url']}': {live_spotify} Spotify tracks + {live_local} local files = {len(live)}")
+    print(f"  Spotify tracks expected from decisions: {len(expected_spotify)}  {'OK' if live_spotify == len(expected_spotify) else 'MISMATCH'}")
+    print(f"  Local files to drag in by hand: {len(keep_local)}  (present now: {live_local})")
+    for it in keep_local:
+        print(f"    - {it['title']} — {it['artist']}")
+    print(f"  Unresolved (not yet decided or searched): {len(unresolved)}")
+    for it in unresolved[:40]:
+        v = cache.get(str(it["pos"]), {}).get("verdict", "not_searched")
+        print(f"    - #{it['pos']} {it['title']} — {it['artist']} [{v}{', recheck' if cache.get(str(it['pos']), {}).get('recheck') else ''}]")
+    if len(unresolved) > 40:
+        print(f"    ... and {len(unresolved) - 40} more")
+    total_accounted = live_spotify + live_local
+    if not unresolved and total_accounted == len(src["items"]):
+        print("COMPLETE: every source song is accounted for in the new playlist.")
+    elif not unresolved:
+        print(f"All decided; drag the {len(keep_local) - live_local} remaining local file(s) in to finish.")
+
+
 def cmd_report(args) -> None:
-    wd = current_work()
-    src = json.loads((wd / "source.json").read_text())
-    cache = json.loads((wd / "matches.json").read_text())
+    wd, src, cache = load_state()
     write_reports(wd, src, cache, batch=getattr(args, "batch", None))
 
 
@@ -597,9 +727,7 @@ def desired_uris(src: dict, cache: dict, keep_duplicates: bool) -> tuple[list[st
 
 
 def cmd_build(args) -> None:
-    wd = current_work()
-    src = json.loads((wd / "source.json").read_text())
-    cache = json.loads((wd / "matches.json").read_text())
+    wd, src, cache = load_state()
     uris, dupes = desired_uris(src, cache, args.keep_duplicates)
     result_path = wd / "result.json"
     update_ref = args.update
@@ -673,7 +801,15 @@ def main() -> None:
     ap.add_argument("--reasons", help="comma list: duration_mismatch,title_variant,artist_mismatch,no_match")
     ap.add_argument("--pos", help="comma list of source positions (from flagged.csv)")
     ap.add_argument("--keep-local", help="comma list of positions to never add")
+    ap.add_argument("--recheck", help="comma list of positions to re-search by hand later (tracked, stays open)")
     ap.set_defaults(fn=cmd_approve)
+    rs = sub.add_parser("research", help="re-search one song with a custom query, or pick a specific track uri")
+    rs.add_argument("--pos", type=int, required=True)
+    rs.add_argument("--query")
+    rs.add_argument("--pick", help="spotify:track:... to accept for this song")
+    rs.add_argument("--take", action="store_true", help="accept the top result even if not an exact match")
+    rs.set_defaults(fn=cmd_research)
+    sub.add_parser("verify", help="check the new playlist accounts for every source song").set_defaults(fn=cmd_verify)
     rp = sub.add_parser("report", help="re-print the breakdown and rewrite flagged.csv")
     rp.add_argument("--batch", help="also write flagged_<batch>.csv for this batch date (YYYY-MM-DD)")
     rp.set_defaults(fn=cmd_report)
