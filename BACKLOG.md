@@ -15,7 +15,7 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 | Playlist | Songs | Status |
 |---|---|---|
-| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day, ~300 songs/session (Spotify search quota ≈400/day, resets ~12:43). 2026-10-07: 290 searched, 247 on Spotify, 5 keep-local (carried from Pry), 38 open flags: 14 marked recheck (Kygo remixes etc., re-search with `research`), 15 group-B "different version" declined for now, 9 nothing-found pending a decision. |
+| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day, ~300 songs/session (Spotify search quota ≈400/day, resets ~12:43). 2026-10-07 end: 290 searched, 253 on Spotify, 13 keep-local (to drag in by hand), 24 open flags: 14 marked recheck (Kygo remixes, Let It Go, etc. — re-search with `research`), 9 nothing-found pending a decision, 1 other. Group B fully decided. |
 
 Daily loop: `python3 migrate.py -w iPhone match --limit 300` → `build` → review `work/iphone/flagged_<date>.csv` →
 `approve --pos ... --keep-local ... --recheck ...` → `build` → `verify`.
