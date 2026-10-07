@@ -1,127 +1,173 @@
-# SpotifyLocalMigrator
+<h1 align="center">🎧 SpotifyLocalMigrator</h1>
 
-Rebuild a Spotify **local files** playlist as a regular Spotify playlist, adding
-only songs that are an exact catalog match, and get a clear list of everything
-that wasn't.
+<p align="center">
+  <em>Turn that decade-old "local files" playlist into a real Spotify playlist, without letting a single song slip through the cracks.</em>
+</p>
 
-Why: Spotify syncs local files to your phone from the desktop app, and that sync
-is flaky. If 95% of a playlist is also in Spotify's catalog, you're better off
-with a real playlist plus a handful of local files dragged in by hand.
+<p align="center">
+  <a href="https://github.com/wardcrazy01894/SpotifyLocalMigrator/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/wardcrazy01894/SpotifyLocalMigrator/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=fff">
+  <img alt="Dependencies: none" src="https://img.shields.io/badge/dependencies-none-brightgreen">
+  <img alt="Spotify Web API" src="https://img.shields.io/badge/Spotify-Web_API-1DB954?logo=spotify&logoColor=fff">
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-- Plain Python 3.10+, standard library only. Nothing to install.
-- Strict matching: **title + artist + duration (within 2 s)** must all agree.
-- Everything else is **flagged with a reason**, never silently added or dropped.
-- You approve flagged songs in bulk or one at a time; the playlist is rewritten
-  in place, preserving the original order.
-- Resumable: a 3,000-song playlist takes ~30 min at Spotify's search rate limit,
-  and you can stop and restart without losing progress.
+---
 
-## One-time setup
+## 😩 The problem
 
-1. Go to <https://developer.spotify.com/dashboard> and log in with the Spotify
-   account that owns the playlists (Spotify requires Premium for the dashboard).
-2. **Create app**:
-   - App name / description: anything.
-   - Redirect URI: `http://127.0.0.1:8888/callback` (exactly), click **Add**.
-   - APIs used: tick **Web API**.
-3. Open the app → **Settings** → copy the **Client ID** (the secret is not needed).
-4. In this folder:
+You ripped your CDs in 2011. You dragged the MP3s into Spotify. Spotify syncs them to your phone from the desktop app… sometimes. Then a few hundred of them go grey and unplayable for no reason.
+
+Meanwhile, 95% of those songs are sitting right there in Spotify's catalog.
+
+## 💡 The fix
+
+Rebuild the playlist out of real Spotify tracks, **but only where the match is exact**, and hand everything else to a human to rule on.
+
+```
+  local files playlist                        real Spotify playlist
+ ┌──────────────────────┐                    ┌──────────────────────┐
+ │ 🎵 Mr. Brightside    │ ── exact match ──▶ │ 🎵 Mr. Brightside    │
+ │ 🎵 Car Radio (2011)  │ ── ⚠ flagged  ──▶ │   (you decide)       │
+ │ 🎵 Cousin's demo.mp3 │ ── ❌ not found ─▶ │   (stays local)      │
+ └──────────────────────┘                    └──────────────────────┘
+```
+
+**Exact** means title *and* artist *and* duration (within 2 seconds) all agree. Nothing fuzzier gets added without you saying so.
+
+## ✨ What you get
+
+| | |
+|---|---|
+| 🎯 **Strict matching** | Same title, same artist, same length. Case, punctuation, accents and leading track numbers are ignored. |
+| 🚩 **Every mismatch flagged with a reason** | `duration_mismatch`, `title_variant`, `artist_mismatch`, `no_match`, each with the closest Spotify track shown next to it. |
+| ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". The playlist is rewritten in place, original order preserved. |
+| 🔁 **Decisions carry everywhere** | Approve *Three Little Birds* once and it's approved in every other playlist that has it. |
+| 📅 **Built for the daily grind** | Spotify caps searches per day. `match --limit 300` does a batch and stops; progress is saved every 10 songs. |
+| 🧾 **Completeness check** | `verify` proves source count = Spotify tracks + local files, and lists anything undecided. |
+| 🪶 **Zero dependencies** | One Python file, standard library only. |
+
+## 🚀 Setup (one time, ~3 minutes)
+
+1. Open the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and log in with the account that owns the playlists (Premium required by Spotify).
+2. **Create app** → any name → Redirect URI `http://127.0.0.1:8888/callback` → tick **Web API** → Save.
+3. Open the app → **Settings** → copy the **Client ID**. The secret isn't needed.
+4. Log in once:
 
    ```bash
-   echo YOUR_CLIENT_ID > client_id.txt         # gitignored
+   echo YOUR_CLIENT_ID > client_id.txt            # gitignored
    export SPOTIFY_CLIENT_ID=$(cat client_id.txt)
-   python3 migrate.py auth                      # opens a browser, click Agree once
+   python3 migrate.py auth                         # browser opens, click Agree
    ```
 
-   A refresh token is saved to `token.json` (gitignored) and renewed automatically.
-
-## Run
+## 🏃 Run
 
 ```bash
 export SPOTIFY_CLIENT_ID=$(cat client_id.txt)
 
-python3 migrate.py find pry                    # list your playlists matching "pry"
-python3 migrate.py export "name:Pry"           # -> work/pry/source.json
-python3 migrate.py match                       # -> work/pry/matches.json + flagged.csv + breakdown
-python3 migrate.py build --name "Pry (spotify version)"   # creates the playlist with exact matches only
+python3 migrate.py find pry                         # which of my playlists match "pry"?
+python3 migrate.py export "name:Pry"                # pull the source playlist (local files included)
+python3 migrate.py match                            # search Spotify for every song
+python3 migrate.py build --name "Pry (Spotify version)"   # create it with exact matches only
 ```
 
-`export` also accepts a playlist URL, URI, or 22-character id.
-
-### Review and approve
-
-`match` prints a breakdown like:
+You'll get a breakdown like this:
 
 ```
-match               91   added
-duration_mismatch    6   same title+artist, length differs (closest candidate shown)
-title_variant        7   title matches only after stripping "(feat. ...)", "- Live", "(Album Version)", "Taylor's Version"...
-artist_mismatch      3   title+length match, artist credited differently ("Pink" vs "P!nk, Nate Ruess")
-no_match             5   nothing close (local-only songs, typos, covers)
+{
+ "total": 112,
+ "searched": 112,
+ "in_playlist_after_build": 91,
+ "open_flags": 21,
+ "counts": {
+  "match": 91,
+  "duration_mismatch": 6,
+  "title_variant": 7,
+  "artist_mismatch": 3,
+  "no_match": 5
+ }
+}
+Open flags: work/pry/flagged.csv
 ```
 
-`work/<playlist>/flagged.csv` lists each flagged song with the closest Spotify
-track, the length difference, and its `pos` (position in the source playlist).
+### 🧑‍⚖️ Then you judge
 
-Approve by reason, by position, or mark songs to keep local, then rewrite the
-playlist in place:
+Open `work/<playlist>/flagged.csv`. Each row has your file, the closest Spotify track, the length difference and a `pos` you can reference.
 
 ```bash
-python3 migrate.py approve --reasons duration_mismatch,title_variant
-python3 migrate.py approve --pos 42,107 --keep-local 55
-python3 migrate.py build                        # rewrites the playlist created above, same URL, original order
-python3 migrate.py report                       # re-print the breakdown any time
+python3 migrate.py approve --reasons title_variant          # "(feat. X)" vs "feat. X"? fine, take them all
+python3 migrate.py approve --pos 37,134                      # these two specifically
+python3 migrate.py approve --keep-local 141                  # never add this one, I like my version
+python3 migrate.py approve --recheck 211,223                 # the search landed on the wrong track, look again later
+python3 migrate.py research --pos 211 --query "I See Fire Kygo remix"   # …like this
+python3 migrate.py build                                     # rewrite the playlist, same URL, original order
+python3 migrate.py verify                                    # are we done yet?
 ```
 
-Several playlists can be in flight at once; `-w <name>` picks which one
-(default is the last one exported): `python3 migrate.py -w Pry report`.
+```
+Source 'Pry': 112 songs (112 searched so far)
+New playlist: 107 Spotify tracks + 5 local files = 112
+  Spotify tracks expected from decisions: 107  OK
+  Local files to drag in by hand: 5  (present now: 5)
+  Unresolved (not yet decided or searched): 0
+COMPLETE: every source song is accounted for in the new playlist.
+```
 
-### Finishing by hand
+### 📅 Big playlist? Do it in days
 
-Two things the Web API cannot do:
+Spotify's search endpoint allows roughly 400 searches per day for a personal app, then returns a 24-hour timeout. The tool stops cleanly instead of sleeping, and picks up where it left off:
 
-- **Playlist folders.** Create the folder in the desktop app and drag the new
-  playlist in.
-- **Local files.** Drag the leftover local-only songs from the old playlist into
-  the new one in the desktop app. Local files can live in any playlist.
+```bash
+python3 migrate.py -w iPhone match --limit 300    # today's batch
+python3 migrate.py -w iPhone build                # playlist grows a bit
+# review work/iphone/flagged_<today>.csv, approve, build, verify… see you tomorrow
+```
 
-## Matching details
+`-w <name>` selects which exported playlist you're working on, so several can be in flight.
 
-Titles and artists are compared after lower-casing, stripping accents and
-punctuation, and removing a leading track number (`03 - Song` → `song`).
-`&` and `and` are treated as equal. A local artist string like
-`Jay-Z feat. Alicia Keys` matches a Spotify credit of `JAY-Z, Alicia Keys`.
+## ✋ Two things only a human can do
 
-Spotify stores local-file durations rounded to whole seconds, so the 2 s
-tolerance is the floor of what's meaningful. Change `DUR_TOL_MS` at the top of
-`migrate.py` if you want it looser.
+- **Folders.** The Web API has no concept of playlist folders. Make the folder in the desktop app and drag the new playlist in.
+- **Local files.** Drag the keep-local songs from the old playlist into the new one in the desktop app. `verify` counts them.
 
-Searches use `market=US`. Edit `search_candidates()` if you're elsewhere; with
-the `user-read-private` scope you could use `market=from_token` instead.
+## 🔬 Matching details
 
-## Files
+<details>
+<summary>How "exact" is decided</summary>
+
+- `norm()`: NFKD-fold accents, lower-case, strip punctuation, collapse spaces, `&` → `and`, drop a leading `03 - ` track number.
+- `core_title()`: additionally drops `(…)` / `[…]` groups, `feat.` tails and ` - Remastered` / ` - Live` / ` - Radio Edit` style suffixes. Used only to *flag* a `title_variant`, never to auto-add.
+- Artists match if the local string equals any credited artist, the joined credits, or (after splitting on `,` `;` `&` `feat.` `vs.` `x`) one side's set contains the other.
+- Duration must be within `DUR_TOL_MS` (2000 ms). Spotify stores local-file lengths rounded to whole seconds, so that's about as tight as it gets.
+- Candidates come from up to three searches (`track:"…" artist:"…"`, a plain query, and a parenthesis-stripped title), stopping early once an exact match appears.
+</details>
+
+<details>
+<summary>Spotify Web API notes (October 2026)</summary>
+
+Several endpoints were renamed and the old ones now return 403:
+
+- `GET /playlists/{id}/tracks` → `GET /playlists/{id}/items`; each entry's track is under `item`, and the count is `items.total`.
+- `POST /users/{id}/playlists` → `POST /me/playlists`.
+- `public: false` on create is ignored; the tool follows up with a `PUT`, which Spotify may also ignore.
+- `market=from_token` needs the `user-read-private` scope; the tool uses `market=US` instead (edit `search_candidates()` if you're elsewhere).
+- Local files come back with `is_local: true`, a `spotify:local:…` URI and real title/artist/album/duration metadata, which is the whole reason this works.
+</details>
+
+## 🗂️ Files
 
 | Path | What |
 |---|---|
 | `migrate.py` | the whole tool |
-| `client_id.txt`, `token.json` | your credentials, gitignored |
+| `client_id.txt`, `token.json` | your credentials (gitignored) |
+| `work/approvals.json` | standing decisions, applied across all playlists |
 | `work/<playlist>/source.json` | exported source playlist |
 | `work/<playlist>/matches.json` | per-song verdict, closest candidate, approvals |
-| `work/<playlist>/flagged.csv` | human-readable review list |
-| `work/<playlist>/summary.json` | the counts |
-| `work/<playlist>/result.json` | id/URL of the playlist that was built |
+| `work/<playlist>/flagged.csv` | review list of everything still open |
+| `work/<playlist>/flagged_<date>.csv` | just that day's batch |
+| `work/<playlist>/result.json` | id and URL of the playlist that was built |
+| `BACKLOG.md` | which playlists are done, in progress and queued |
 
-## Spotify API notes (October 2026)
+## 📜 License
 
-Spotify renamed several endpoints and the old ones now return 403:
-
-- `GET /playlists/{id}/tracks` → `GET /playlists/{id}/items`; each entry's track
-  is under `item`, and a playlist's count is `items.total`.
-- `POST /users/{id}/playlists` → `POST /me/playlists`.
-- `public: false` on create was ignored; the tool follows up with a `PUT`.
-- Local files come back with `is_local: true`, a `spotify:local:...` URI, and
-  real title/artist/album/duration metadata, which is what makes this work.
-
-## License
-
-MIT
+MIT. Built with [Claude Code](https://claude.ai/code) doing the typing.
