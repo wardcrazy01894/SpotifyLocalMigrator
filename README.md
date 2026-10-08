@@ -20,7 +20,7 @@ Meanwhile, 95% of those songs are sitting right there in Spotify's catalog.
 Rebuild the playlist out of real Spotify tracks, **but only where the match is exact**, and hand everything else to a human to rule on.
 
 ```
-  local files playlist                       real Spotify playlist
+  local files playlist                        real Spotify playlist
  ┌──────────────────────┐                    ┌──────────────────────┐
  │ Mr. Brightside       │ ── exact match ──> │ Mr. Brightside       │
  │ Car Radio (2011)     │ ── flagged ──────> │ (you decide)         │
