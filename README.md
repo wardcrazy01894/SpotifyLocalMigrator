@@ -4,13 +4,8 @@
   <em>Turn that decade-old "local files" playlist into a real Spotify playlist, without letting a single song slip through the cracks.</em>
 </p>
 
-<p align="center">
-  <a href="https://github.com/wardcrazy01894/SpotifyLocalMigrator/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/wardcrazy01894/SpotifyLocalMigrator/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=fff">
-  <img alt="Dependencies: none" src="https://img.shields.io/badge/dependencies-none-brightgreen">
-  <img alt="Spotify Web API" src="https://img.shields.io/badge/Spotify-Web_API-1DB954?logo=spotify&logoColor=fff">
-  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-</p>
+
+> **What this is not:** this tool does not download, copy, convert or store any audio, and it contains no media files or binaries. It only creates ordinary Spotify playlists that reference tracks already in Spotify's catalog, through Spotify's official Web API, on the user's own account.
 
 ---
 
@@ -170,4 +165,4 @@ Several endpoints were renamed and the old ones now return 403:
 
 ## 📜 License
 
-MIT. Built with [Claude Code](https://claude.ai/code) doing the typing.
+MIT. Built with Claude Code doing the typing.
