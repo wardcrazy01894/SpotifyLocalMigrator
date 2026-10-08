@@ -23,8 +23,8 @@ Rebuild the playlist out of real Spotify tracks, **but only where the match is e
   local files playlist                        real Spotify playlist
  ┌──────────────────────┐                    ┌──────────────────────┐
  │ 🎵 Mr. Brightside    │ ── exact match ──▶ │ 🎵 Mr. Brightside    │
- │ 🎵 Car Radio (2011)  │ ── ⚠ flagged  ──▶ │   (you decide)       │
- │ 🎵 Cousin's demo.mp3 │ ── ❌ not found ─▶ │   (stays local)      │
+ │ 🎵 Car Radio (2011)  │ ── flagged ──────▶ │    (you decide)      │
+ │ 🎵 Cousin's demo.mp3 │ ── not found ────▶ │    (stays local)     │
  └──────────────────────┘                    └──────────────────────┘
 ```
 
