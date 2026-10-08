@@ -15,7 +15,7 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 | Playlist | Songs | Status |
 |---|---|---|
-| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day (Spotify search quota: 400 songs + ~30 re-searches went through on 2026-10-08 with no limit; resets ~12:43). 2026-10-08 end: 690 searched, 627 on Spotify, 63 keep-local (drag in by hand), 0 open flags. |
+| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day. Daily Spotify search budget measured 2026-10-08: 423 songs + ~30 re-searches, then 429 for ~23 h (resets ~13:30); it is a daily total, not burst-based. 2026-10-08 end: 713 searched, 648 on Spotify, 64 keep-local, 1 recheck (Pursuit of Happiness Steve Aoki Remix). |
 
 Daily loop: `python3 migrate.py -w iPhone match --limit 300` → `build` → review `work/iphone/flagged_<date>.csv` →
 `approve --pos ... --keep-local ... --recheck ...` → `build` → `verify`.
