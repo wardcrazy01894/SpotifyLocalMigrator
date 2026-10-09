@@ -675,6 +675,7 @@ def cmd_verify(args) -> None:
     live = paged(f"{API}/playlists/{res['playlist_id']}/items", {"limit": 50, "fields": "next,items(is_local,item(uri))"})
     live_spotify = sum(1 for x in live if not x.get("is_local"))
     live_local = sum(1 for x in live if x.get("is_local"))
+    live_local_uris = {(x.get("item") or {}).get("uri") for x in live if x.get("is_local")}
     expected_spotify, _ = desired_uris(src, cache, False)
     keep_local = [it for it in src["items"] if cache.get(str(it["pos"]), {}).get("keep_local")]
     unresolved = [
@@ -686,8 +687,11 @@ def cmd_verify(args) -> None:
     print(f"New playlist '{res['url']}': {live_spotify} Spotify tracks + {live_local} local files = {len(live)}")
     print(f"  Spotify tracks expected from decisions: {len(expected_spotify)}  {'OK' if live_spotify == len(expected_spotify) else 'MISMATCH'}")
     print(f"  Local files to drag in by hand: {len(keep_local)}  (present now: {live_local})")
-    for it in keep_local:
-        print(f"    - {it['title']} — {it['artist']}")
+    still_missing = [it for it in keep_local if it["uri"] not in live_local_uris]
+    if len(still_missing) != len(keep_local):
+        print(f"  Still missing: {len(still_missing)}")
+    for it in still_missing:
+        print(f"    - #{it['pos'] + 1} {it['title']} — {it['artist']}")
     print(f"  Unresolved (not yet decided or searched): {len(unresolved)}")
     for it in unresolved[:40]:
         v = cache.get(str(it["pos"]), {}).get("verdict", "not_searched")
@@ -726,6 +730,49 @@ def desired_uris(src: dict, cache: dict, keep_duplicates: bool) -> tuple[list[st
     return uris, before - len(uris)
 
 
+def live_uris(playlist_id: str) -> list[str]:
+    live = paged(f"{API}/playlists/{playlist_id}/items", {"limit": 50, "fields": "next,items(is_local,item(uri))"})
+    return [(x.get("item") or {}).get("uri") or "" for x in live]
+
+
+def merge_playlist(playlist_id: str, desired: list[str], live: list[str]) -> None:
+    """Bring the playlist to `desired` without touching local files already in it.
+
+    Missing Spotify tracks are inserted just before the next desired track that is
+    already present, so the original order survives. Spotify tracks that are no
+    longer wanted are reported, not removed.
+    """
+    present = set(live)
+    missing = [u for u in desired if u not in present]
+    n_local = sum(1 for u in live if u.startswith("spotify:local:"))
+    print(f"  {n_local} local file(s) already in the playlist; merging {len(missing)} new track(s) instead of replacing.")
+    i = 0
+    while i < len(missing):
+        # find where this run of missing tracks should go: before the first later
+        # desired track that is already in the playlist
+        d_idx = desired.index(missing[i])
+        anchor = next((u for u in desired[d_idx + 1 :] if u in present), None)
+        position = live.index(anchor) if anchor is not None else len(live)
+        run = [missing[i]]
+        i += 1
+        while i < len(missing) and len(run) < 100:
+            d_next = desired.index(missing[i])
+            nxt = next((u for u in desired[d_next + 1 :] if u in present), None)
+            if nxt != anchor:
+                break
+            run.append(missing[i])
+            i += 1
+        api_post(f"/playlists/{playlist_id}/items", {"uris": run, "position": position})
+        live[position:position] = run
+        present.update(run)
+        print(f"  inserted {i}/{len(missing)}", end="\r", flush=True)
+    extra = [u for u in live if u.startswith("spotify:track:") and u not in set(desired)]
+    if extra:
+        print(f"  NOTE: {len(extra)} Spotify track(s) in the playlist are no longer wanted; remove by hand:")
+        for u in extra:
+            print(f"    - https://open.spotify.com/track/{u.split(':')[-1]}")
+
+
 def cmd_build(args) -> None:
     wd, src, cache = load_state()
     uris, dupes = desired_uris(src, cache, args.keep_duplicates)
@@ -739,10 +786,16 @@ def cmd_build(args) -> None:
         print(f"Rewriting '{pl['name']}' with {len(uris)} tracks ({dupes} duplicate(s) collapsed) ...")
         if args.dry_run:
             return
-        _call("PUT", f"/playlists/{pl['id']}/items", body={"uris": uris[:100]})
-        for i in range(100, len(uris), 100):
-            api_post(f"/playlists/{pl['id']}/items", {"uris": uris[i : i + 100]})
-            print(f"  added {min(i + 100, len(uris))}/{len(uris)}", end="\r", flush=True)
+        live = live_uris(pl["id"])
+        if any(u.startswith("spotify:local:") for u in live):
+            # Local files have been dragged in by hand; a full replace would drop them
+            # (the API cannot add local files). Merge instead, inserting new tracks in order.
+            merge_playlist(pl["id"], uris, live)
+        else:
+            _call("PUT", f"/playlists/{pl['id']}/items", body={"uris": uris[:100]})
+            for i in range(100, len(uris), 100):
+                api_post(f"/playlists/{pl['id']}/items", {"uris": uris[i : i + 100]})
+                print(f"  added {min(i + 100, len(uris))}/{len(uris)}", end="\r", flush=True)
     else:
         name = args.name or f"{src['name']} (spotify version)"
         print(f"Creating playlist '{name}' with {len(uris)} tracks ({dupes} duplicate(s) collapsed) ...")
