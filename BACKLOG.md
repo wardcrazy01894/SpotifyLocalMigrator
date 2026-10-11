@@ -15,7 +15,7 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 | Playlist | Songs | Status |
 |---|---|---|
-| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day. Daily Spotify search budget measured 2026-10-08: 423 songs + ~30 re-searches, then 429 for ~23 h (resets ~13:30); it is a daily total, not burst-based. 2026-10-10 end: 1634 searched, 1493 on Spotify, 129 keep-local, 0 open flags, 8 rechecks for tomorrow (pos 1520,1521,1536,1564,1579,1581,1599,1632). Budget measured today: 485 songs + 23 re-searches before 429 (Retry-After 21.4 h → 13:40). Window confirmed rolling 24 h from the day's first search (12:15 run got 36 songs then 429 until 13:40). |
+| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day. Daily Spotify search budget: 423 songs + ~30 re-searches (2026-10-08) and 485 songs + 23 re-searches (2026-10-10) before a 429; rolling 24 h window from the day's first search, currently ~13:40. 2026-10-10 end: 1634 searched, 1493 on Spotify, 129 keep-local, 0 open flags, 8 rechecks for tomorrow (pos 1520,1521,1536,1564,1579,1581,1599,1632). Budget measured today: 485 songs + 23 re-searches before 429 (Retry-After 21.4 h → 13:40). |
 
 Daily loop: `python3 migrate.py -w iPhone match --limit 400` → `build` → review `work/iphone/flagged_<date>.csv` →
 `approve --pos ... --keep-local ... --recheck ...` → `build` → `verify`.
@@ -43,9 +43,10 @@ Per playlist:
 ```bash
 export SPOTIFY_CLIENT_ID=$(cat client_id.txt)
 python3 migrate.py export "name:<Playlist>"
-python3 migrate.py match
-python3 migrate.py build --name "<Playlist> (Spotify version)"
+python3 migrate.py -w "<Playlist>" match
+python3 migrate.py -w "<Playlist>" build --name "<Playlist> (Spotify version)"
 # review work/<playlist>/flagged.csv, then:
-python3 migrate.py approve --reasons ... --pos ... --keep-local ...
-python3 migrate.py build
+python3 migrate.py -w "<Playlist>" approve --pos ... --keep-local ...
+python3 migrate.py -w "<Playlist>" build
+python3 migrate.py -w "<Playlist>" verify     # done only when it prints COMPLETE
 ```
