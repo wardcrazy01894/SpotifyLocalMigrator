@@ -5,13 +5,18 @@ Pipeline (each step is resumable and writes to ./work/<slug>/):
   auth              one-time browser login (PKCE, no client secret needed)
   find   <name>     locate one of your playlists by name, print its id/url
   export <ref>      dump the source playlist (incl. local files) -> source.json
-  match             search Spotify for each local track; strict matching -> matches.json
-  build             create the new playlist, add matched tracks -> result.json
-  all    <ref>      export + match + build
+  match [--limit N] search Spotify for each local track; strict matching -> matches.json
+  build             create the new playlist, or bring the existing one up to date -> result.json
+  approve           approve flagged songs (by reason or position), keep-local, recheck, unkeep
+  research          re-search one song by hand, or pick a specific track for it
+  verify            prove every source song is accounted for in the new playlist
+  report            re-print the breakdown and rewrite flagged.csv
+  all    <ref>      export + match + build in one go (small playlists)
 
 <ref> is a playlist URL/URI/id, or a playlist name prefixed with "name:".
+-w <name> selects which exported playlist the command works on.
 Only the Python standard library is used. The Web API cannot create playlist
-folders, so the folder step stays manual in the desktop app.
+folders or add local files, so those two steps stay manual in the desktop app.
 """
 from __future__ import annotations
 
@@ -47,7 +52,6 @@ SCOPES = (
 API = "https://api.spotify.com/v1"
 MARKET = "US"              # search/track market; the token's scopes do not allow market=from_token
 DUR_TOL_MS = 2000          # title+artist+duration within this => added
-DUR_FLAG_MS = 10000        # beyond this we call it a different recording
 
 
 # ----------------------------------------------------------------------------
@@ -276,7 +280,8 @@ def current_work() -> Path:
 
 
 def _total(p: dict) -> int:
-    return ((p.get('items') or p.get('tracks') or {}).get('total', 0))
+    # "items" since the Oct 2026 rename; "tracks" kept for older responses
+    return (p.get("items") or p.get("tracks") or {}).get("total", 0)
 
 
 def my_playlists() -> list[dict]:
@@ -322,9 +327,11 @@ def cmd_export(args) -> Path:
         },
     )
     items: list[dict] = []
+    skipped = 0
     for it in raw:
-        t = it.get("item") or it.get("track") or {}
+        t = it.get("item") or {}
         if not t:
+            skipped += 1  # unavailable/removed entry; Spotify returns it as null
             continue
         items.append(
             {
@@ -341,6 +348,8 @@ def cmd_export(args) -> Path:
     local = sum(1 for i in items if i["is_local"])
     (wd / "source.json").write_text(json.dumps({"name": name, "id": pid, "items": items}, indent=1))
     print(f"Exported {len(items)} items ({local} local files, {len(items) - local} Spotify tracks) -> {wd / 'source.json'}")
+    if skipped:
+        print(f"  {skipped} unavailable entr{'y' if skipped == 1 else 'ies'} skipped; positions are renumbered", file=sys.stderr)
     return wd
 
 
@@ -1078,7 +1087,7 @@ def cmd_build(args) -> None:
                 api_post(f"/playlists/{pl['id']}/items", {"uris": uris[i : i + 100]})
                 print(f"  added {min(i + 100, len(uris))}/{len(uris)}", end="\r", flush=True)
     else:
-        name = args.name or f"{src['name']} (spotify version)"
+        name = args.name or f"{src['name']} (Spotify version)"
         print(f"Creating playlist '{name}' with {len(uris)} tracks ({dupes} duplicate(s) collapsed) ...")
         if args.dry_run:
             return
@@ -1114,7 +1123,9 @@ def cmd_build(args) -> None:
 
 
 def cmd_all(args) -> None:
+    global WORK_OVERRIDE
     cmd_export(args)
+    WORK_OVERRIDE = None  # operate on what was just exported, whatever -w said
     cmd_match(args)
     cmd_build(args)
 
@@ -1124,18 +1135,18 @@ def main() -> None:
     p.add_argument("-w", "--work", help="which exported playlist to operate on (its name); default: the last one exported")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("auth").set_defaults(fn=cmd_auth)
-    f = sub.add_parser("find")
+    f = sub.add_parser("find", help="list your playlists whose name contains <name>")
     f.add_argument("name")
     f.set_defaults(fn=cmd_find)
-    e = sub.add_parser("export")
+    e = sub.add_parser("export", help="dump the source playlist (local files included) to work/<slug>/source.json")
     e.add_argument("playlist", help='playlist URL/URI/id, or "name:<playlist name>"')
     e.set_defaults(fn=cmd_export)
-    mt = sub.add_parser("match")
-    mt.add_argument("--limit", type=int, help="search at most this many new songs (daily quota is roughly 400)")
+    mt = sub.add_parser("match", help="search Spotify for every local file not yet searched")
+    mt.add_argument("--limit", type=int, help="search at most this many new songs (daily budget is roughly 400-480 songs)")
     mt.set_defaults(fn=cmd_match)
 
     ap = sub.add_parser("approve", help="approve flagged tracks for adding, or mark them keep-local")
-    ap.add_argument("--reasons", help="comma list: duration_mismatch,title_variant,artist_mismatch,no_match")
+    ap.add_argument("--reasons", help="comma list: duration_mismatch,title_variant,artist_mismatch,no_match,no_duration")
     ap.add_argument("--pos", help="comma list of source positions (from flagged.csv)")
     ap.add_argument("--keep-local", help="comma list of positions to never add")
     ap.add_argument("--recheck", help="comma list of positions to re-search by hand later (tracked, stays open)")
@@ -1160,17 +1171,21 @@ def main() -> None:
         sp.add_argument("--keep-duplicates", action="store_true")
         sp.add_argument("--dry-run", action="store_true")
 
-    b = sub.add_parser("build")
+    b = sub.add_parser("build", help="create the new playlist, or bring the existing one up to date")
     build_opts(b)
     b.set_defaults(fn=cmd_build)
-    a = sub.add_parser("all")
+    a = sub.add_parser("all", help="export + match + build in one go")
     a.add_argument("playlist")
+    a.add_argument("--limit", type=int, help="search at most this many songs before building")
     build_opts(a)
     a.set_defaults(fn=cmd_all)
     args = p.parse_args()
     global WORK_OVERRIDE
     WORK_OVERRIDE = args.work
-    args.fn(args)
+    try:
+        args.fn(args)
+    except RateLimited as e:
+        sys.exit(f"{e}. Progress so far is saved; try again later.")
 
 
 if __name__ == "__main__":

@@ -36,10 +36,10 @@ Rebuild the playlist out of real Spotify tracks, **but only where the match is e
 |---|---|
 | 🎯 **Strict matching** | Same title, same artist, same length. Case, punctuation, accents and leading track numbers are ignored. |
 | 🚩 **Every mismatch flagged with a reason** | `duration_mismatch`, `title_variant`, `artist_mismatch`, `no_match`, each with the closest Spotify track shown next to it. |
-| ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". The playlist is rewritten in place, original order preserved. |
+| ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". `build` brings the playlist up to date in place, original order preserved, and never touches local files you have already dragged in. |
 | 🔁 **Decisions carry everywhere** | Approve *Three Little Birds* once and it's approved in every other playlist that has it. |
-| 📅 **Built for the daily grind** | Spotify caps searches per day. `match --limit 300` does a batch and stops; progress is saved every 10 songs. |
-| 🧾 **Completeness check** | `verify` proves source count = Spotify tracks + local files, and lists anything undecided. |
+| 📅 **Built for the daily grind** | Spotify caps searches per day. `match --limit 400` does a batch and stops; progress is saved every 10 songs. |
+| 🧾 **Completeness check** | `verify` proves every source song is in the new playlist (as a Spotify track or a dragged-in local file) or is a collapsed duplicate, lists anything undecided, and calls out non-track items (podcast episodes) it cannot carry over. |
 | 🪶 **Zero dependencies** | One Python file, standard library only. |
 
 ## 🚀 Setup (one time, ~3 minutes)
@@ -72,6 +72,7 @@ You'll get a breakdown like this:
 {
  "total": 112,
  "searched": 112,
+ "not_searched": 0,
  "in_playlist_after_build": 91,
  "open_flags": 21,
  "counts": {
@@ -82,38 +83,47 @@ You'll get a breakdown like this:
   "no_match": 5
  }
 }
-Open flags: work/pry/flagged.csv
+Open flags: .../work/pry/flagged.csv; this batch: .../work/pry/flagged_2026-10-07.csv
 ```
+
+Reasons you can see: `duration_mismatch`, `title_variant`, `artist_mismatch`, `no_match`, plus the rare `no_duration` (your file has no length) and `no_candidates` (search returned nothing; use `research`).
 
 ### 🧑‍⚖️ Then you judge
 
-Open `work/<playlist>/flagged.csv`. Each row has your file, the closest Spotify track, the length difference and a `pos` you can reference.
+Open `work/<playlist>/flagged.csv`. Each row has your file, the closest Spotify track, the length difference and a `pos` you can reference (0-based, the same number every command prints as `#`).
 
 ```bash
 python3 migrate.py approve --reasons title_variant          # "(feat. X)" vs "feat. X"? fine, take them all
 python3 migrate.py approve --pos 37,134                      # these two specifically
 python3 migrate.py approve --keep-local 141                  # never add this one, I like my version
 python3 migrate.py approve --recheck 211,223                 # the search landed on the wrong track, look again later
-python3 migrate.py research --pos 211 --query "I See Fire Kygo remix"   # …like this
-python3 migrate.py build                                     # rewrite the playlist, same URL, original order
+python3 migrate.py research --pos 211 --query "I See Fire Kygo remix"   # …like this; stores it if exact
+python3 migrate.py research --pos 211 --query "…" --take    # or take the top result anyway
+python3 migrate.py research --pos 223 --pick spotify:track:…  # or name the track yourself
+python3 migrate.py approve --unkeep 141                      # changed my mind, reopen it
+python3 migrate.py build                                     # bring the playlist up to date, same URL
 python3 migrate.py verify                                    # are we done yet?
 ```
 
 ```
 Source 'Pry': 112 songs (112 searched so far)
-New playlist: 107 Spotify tracks + 5 local files = 112
+New playlist https://open.spotify.com/playlist/…: 107 Spotify tracks + 5 local files
+  Decided so far: 107 Spotify + 5 local + 0 collapsed duplicate(s) = 112 of 112
   Spotify tracks expected from decisions: 107  OK
   Local files to drag in by hand: 5  (present now: 5)
+  Still missing: 0
   Unresolved (not yet decided or searched): 0
 COMPLETE: every source song is accounted for in the new playlist.
 ```
 
+`build` has two modes. Until you drag a local file into the new playlist it rewrites the whole thing, so order is exact. Once a local file is present (the API cannot add those back), it merges instead: missing tracks are inserted at their place in the source order, and tracks you have since un-approved are listed for you to remove by hand.
+
 ### 📅 Big playlist? Do it in days
 
-Spotify's search endpoint allows roughly 400 searches per day for a personal app, then returns a 24-hour timeout. The tool stops cleanly instead of sleeping, and picks up where it left off:
+For a personal (development-mode) app, Spotify's search endpoint allows roughly 400 to 480 songs per day (each song costs one to three searches), then answers 429 with a Retry-After of up to 24 hours. The window is a rolling 24 hours from the day's first search. `match` stops cleanly instead of sleeping and picks up where it left off; other commands that hit the limit exit with the same message.
 
 ```bash
-python3 migrate.py -w iPhone match --limit 300    # today's batch
+python3 migrate.py -w iPhone match --limit 400    # today's batch
 python3 migrate.py -w iPhone build                # playlist grows a bit
 # review work/iphone/flagged_<today>.csv, approve, build, verify… see you tomorrow
 ```
@@ -130,9 +140,9 @@ python3 migrate.py -w iPhone build                # playlist grows a bit
 <details>
 <summary>How "exact" is decided</summary>
 
-- `norm()`: NFKD-fold accents, lower-case, strip punctuation, collapse spaces, `&` → `and`, drop a leading `03 - ` track number.
+- `norm()`: NFKD-fold accents, lower-case, strip punctuation, collapse spaces, `&` → `and`. `norm_title()` additionally drops a leading `03 - ` track number.
 - `core_title()`: additionally drops `(…)` / `[…]` groups, `feat.` tails and ` - Remastered` / ` - Live` / ` - Radio Edit` style suffixes. Used only to *flag* a `title_variant`, never to auto-add.
-- Artists match if the local string equals any credited artist, the joined credits, or (after splitting on `,` `;` `&` `feat.` `vs.` `x`) one side's set contains the other.
+- Artists match if the local string equals any credited artist, the joined credits, or (after splitting on `,` `;` `/` `&` `+` `feat.` `ft.` `vs.` `x`) one side's set contains the other; as a last resort, the local string minus its `feat.` tail is compared to the first credited artist.
 - Duration must be within `DUR_TOL_MS` (2000 ms). Spotify stores local-file lengths rounded to whole seconds, so that's about as tight as it gets.
 - Candidates come from up to three searches (`track:"…" artist:"…"`, a plain query, and a parenthesis-stripped title), stopping early once an exact match appears.
 </details>
@@ -145,7 +155,7 @@ Several endpoints were renamed and the old ones now return 403:
 - `GET /playlists/{id}/tracks` → `GET /playlists/{id}/items`; each entry's track is under `item`, and the count is `items.total`.
 - `POST /users/{id}/playlists` → `POST /me/playlists`.
 - `public: false` on create is ignored; the tool follows up with a `PUT`, which Spotify may also ignore.
-- `market=from_token` needs the `user-read-private` scope; the tool uses `market=US` instead (edit `search_candidates()` if you're elsewhere).
+- `market=from_token` needs the `user-read-private` scope; the tool uses `market=US` instead (change the `MARKET` constant if you're elsewhere).
 - Local files come back with `is_local: true`, a `spotify:local:…` URI and real title/artist/album/duration metadata, which is the whole reason this works.
 </details>
 
@@ -160,7 +170,9 @@ Several endpoints were renamed and the old ones now return 403:
 | `work/<playlist>/matches.json` | per-song verdict, closest candidate, approvals |
 | `work/<playlist>/flagged.csv` | review list of everything still open |
 | `work/<playlist>/flagged_<date>.csv` | just that day's batch |
-| `work/<playlist>/result.json` | id and URL of the playlist that was built |
+| `work/<playlist>/result.json` | id, URL and counts of the playlist that was built |
+| `work/<playlist>/summary.json` | the breakdown printed after `match`, `approve` and `report` |
+| `work/current` | which playlist commands act on when `-w` is not given |
 | `BACKLOG.md` | which playlists are done, in progress and queued |
 
 ## 📜 License
