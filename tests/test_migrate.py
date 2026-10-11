@@ -156,10 +156,13 @@ class MergePlaylistCalls(unittest.TestCase):
     def test_posts_each_run_with_position(self):
         calls = []
         orig = mg.api_post
+        import contextlib
+        import io
         mg.api_post = lambda path, body: calls.append((path, body)) or {}
         try:
-            mg.merge_playlist("pid", ["spotify:track:A", "spotify:track:B", "spotify:local:z:z:z:1"],
-                              ["spotify:track:A", "spotify:local:z:z:z:1", "spotify:track:OLD"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                mg.merge_playlist("pid", ["spotify:track:A", "spotify:track:B", "spotify:local:z:z:z:1"],
+                                  ["spotify:track:A", "spotify:local:z:z:z:1", "spotify:track:OLD"])
         finally:
             mg.api_post = orig
         self.assertEqual(calls, [("/playlists/pid/items", {"uris": ["spotify:track:B"], "position": 1})])
@@ -360,6 +363,29 @@ class PlanMergeFuzz(unittest.TestCase):
             self.assertEqual(sorted(u for _, run in plan for u in run), sorted(want))
             kept = [u for u in sim if u in set(order)]
             self.assertEqual(kept, [u for u in order if u in set(kept)])
+
+
+class GlobalIdentityGuard(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.orig = mg.GLOBAL_APPROVALS
+        mg.GLOBAL_APPROVALS = Path(self.tmp.name) / "approvals.json"
+
+    def tearDown(self):
+        mg.GLOBAL_APPROVALS = self.orig
+        self.tmp.cleanup()
+
+    def test_metadata_less_files_get_no_standing_decision(self):
+        mg.record_global(local(1, "", "", 100), {"uri": None}, "keep_local", "P")
+        mg.record_global(local(2, "Title only", "", 100), {"uri": None}, "keep_local", "P")
+        self.assertFalse(mg.GLOBAL_APPROVALS.exists())
+
+    def test_forget_global_removes_the_decision(self):
+        it = local(1, "A", "a", 100)
+        mg.record_global(it, {"uri": None}, "keep_local", "P")
+        self.assertIn(mg.song_key(it), mg.load_global())
+        mg.forget_global(it)
+        self.assertNotIn(mg.song_key(it), mg.load_global())
 
 
 class RetryAfter(unittest.TestCase):
