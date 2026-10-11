@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests
 No network: anything that would call the Spotify API is monkeypatched.
 """
+import json
 import sys
 import tempfile
 import unittest
@@ -194,6 +195,26 @@ class CacheAlignment(unittest.TestCase):
         self.assertEqual(mg.align_cache(SRC, cache), (1, 0, 0))
         self.assertEqual(cache["1"]["key"], mg.song_key(SRC["items"][1]))
 
+    def test_two_songs_sharing_a_key_both_keep_their_entries(self):
+        a1, a2 = local(1, "Royals", "Lorde", 190), local(3, "Royals", "Lorde", 190)
+        src = {"name": "T", "items": [remote(0, "spotify:track:R0"), a1, local(2, "B", "b", 5), a2]}
+        cache = {"1": {"verdict": "match", "uri": "spotify:track:A", "key": mg.song_key(a1)},
+                 "3": {"verdict": "match", "uri": "spotify:track:A", "key": mg.song_key(a2)}}
+        self.assertEqual(mg.align_cache(src, cache), (0, 0, 0))
+        src2 = {"name": "T", "items": [remote(0, "spotify:track:R0"), local(1, "NEW", "n", 1), dict(a1, pos=2),
+                                        local(3, "B", "b", 5), dict(a2, pos=4)]}
+        orphans = []
+        self.assertEqual(mg.align_cache(src2, cache, orphans), (0, 2, 0))
+        self.assertEqual(sorted(cache), ["2", "4"])
+        self.assertEqual(orphans, [])
+
+    def test_dropped_entries_are_handed_back(self):
+        src = {"name": "T", "items": [local(0, "A", "a", 1)]}
+        cache = {"0": {"verdict": "match", "uri": "spotify:track:Z", "key": "gone|gone|1"}}
+        orphans = []
+        self.assertEqual(mg.align_cache(src, cache, orphans), (0, 0, 1))
+        self.assertEqual(orphans[0]["former_pos"], "0")
+
     def test_rekeys_after_insert_and_drops_vanished(self):
         src = {"name": "T", "items": [remote(0, "spotify:track:R0"), local(1, "NEW", "n", 50), local(2, "A", "a", 100), local(3, "B", "b", 100)]}
         cache = {
@@ -237,12 +258,108 @@ class GlobalDecisions(unittest.TestCase):
         self.assertTrue(cache["1"]["keep_local"])
         self.assertFalse(mg.wanted(cache["1"]))
 
+    def test_legacy_identity_less_key_is_not_applied(self):
+        it = local(1, "John Blend", "", 314)
+        mg.GLOBAL_APPROVALS.write_text(json.dumps({mg.song_key(it): {"decision": "keep_local", "uri": None, "from_playlist": "P"}}))
+        self.assertEqual(mg.carry_unsearched({"items": [it]}, {}, [it], "d"), [it])
+        self.assertEqual(mg.apply_global({"items": [it]}, {"1": {"verdict": "no_match", "uri": None}}), 0)
+
     def test_approve_elsewhere_does_not_touch_a_match(self):
         it = local(1, "A", "a", 100)
         mg.record_global(it, {"uri": "spotify:track:OTHER"}, "approve", "Other")
         cache = {"1": {"verdict": "match", "uri": "spotify:track:A"}}
         self.assertEqual(mg.apply_global({"items": [it]}, cache), 0)
         self.assertEqual(cache["1"]["uri"], "spotify:track:A")
+
+
+class CallRetries(unittest.TestCase):
+    """_call: 429 is retried for every method (the request was rejected, not processed);
+    5xx/network errors are retried only for GET."""
+
+    class _Resp:
+        def __init__(self, body=b"{}"):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body
+
+    def _run(self, method, outcomes):
+        import urllib.error
+        calls = []
+
+        def fake_urlopen(req, data=None, timeout=None):
+            calls.append(req.get_method())
+            o = outcomes.pop(0)
+            if o == 429:
+                raise urllib.error.HTTPError(req.full_url, 429, "", {"Retry-After": "0"}, self._Resp(b""))
+            if isinstance(o, int) and o != 200:
+                raise urllib.error.HTTPError(req.full_url, o, "", {}, self._Resp(b"boom"))
+            return self._Resp(b'{"ok": true}')
+
+        orig_open, orig_tok, orig_sleep = mg.urllib.request.urlopen, mg.access_token, mg.time.sleep
+        mg.urllib.request.urlopen, mg.access_token, mg.time.sleep = fake_urlopen, lambda: "t", lambda s: None
+        try:
+            return mg._call(method, "/x", body={} if method != "GET" else None), calls
+        finally:
+            mg.urllib.request.urlopen, mg.access_token, mg.time.sleep = orig_open, orig_tok, orig_sleep
+
+    def test_post_retries_after_429(self):
+        res, calls = self._run("POST", [429, 200])
+        self.assertEqual(res, {"ok": True})
+        self.assertEqual(calls, ["POST", "POST"])
+
+    def test_post_does_not_retry_5xx(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self._run("POST", [502, 200])
+        self.assertIn("502", str(cm.exception))
+
+    def test_get_retries_5xx(self):
+        res, calls = self._run("GET", [503, 200])
+        self.assertEqual(res, {"ok": True})
+        self.assertEqual(len(calls), 2)
+
+    def test_long_retry_after_raises_rate_limited(self):
+        import urllib.error
+
+        def fake_urlopen(req, data=None, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 429, "", {"Retry-After": "77000"}, self._Resp(b""))
+
+        orig_open, orig_tok = mg.urllib.request.urlopen, mg.access_token
+        mg.urllib.request.urlopen, mg.access_token = fake_urlopen, lambda: "t"
+        try:
+            with self.assertRaises(mg.RateLimited):
+                mg._call("GET", "/x")
+        finally:
+            mg.urllib.request.urlopen, mg.access_token = orig_open, orig_tok
+
+
+class PlanMergeFuzz(unittest.TestCase):
+    def test_random_cases_place_every_missing_track_once_in_order(self):
+        import random
+        rng = random.Random(7)
+        for _ in range(300):
+            n = rng.randint(1, 60)
+            order = [f"spotify:local:a:b:{i}:1" if rng.random() < 0.2 else f"spotify:track:{i:03d}" for i in range(n)]
+            live = [u for u in order if rng.random() < 0.6]
+            extra = [f"spotify:track:X{i}" for i in range(rng.randint(0, 2))]
+            for e in extra:
+                live.insert(rng.randint(0, len(live)), e)
+            plan = mg.plan_merge(order, live)
+            sim = list(live)
+            for pos, run in plan:
+                self.assertTrue(0 <= pos <= len(sim))
+                self.assertTrue(1 <= len(run) <= 100)
+                sim[pos:pos] = run
+            want = [u for u in order if u.startswith("spotify:track:") and u not in set(live)]
+            self.assertEqual(sorted(u for _, run in plan for u in run), sorted(want))
+            kept = [u for u in sim if u in set(order)]
+            self.assertEqual(kept, [u for u in order if u in set(kept)])
 
 
 class RetryAfter(unittest.TestCase):

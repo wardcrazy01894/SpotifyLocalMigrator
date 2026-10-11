@@ -169,7 +169,8 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
     attempts = 8 if method == "GET" else 1
     last_err = ""
-    for attempt in range(attempts):
+    attempt = 0
+    while attempt < attempts:
         req = urllib.request.Request(url, method=method)
         req.add_header("Authorization", f"Bearer {access_token()}")
         data = None
@@ -182,6 +183,7 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
             if e.code == 429:
+                # Rejected before processing, so retrying is safe for writes too; does not count as an attempt.
                 wait = _retry_after(e.headers)
                 if wait > 120:
                     raise RateLimited(wait) from None
@@ -190,16 +192,18 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
                 continue
             detail = e.read().decode(errors="replace")
             last_err = f"{e.code}: {detail[:300]}"
-            if e.code in (500, 502, 503, 504) and attempt < attempts - 1:
+            attempt += 1
+            if e.code in (500, 502, 503, 504) and attempt < attempts:
                 print(f"\n  {method} {url} -> {last_err}; retrying", file=sys.stderr)
-                time.sleep(2 * (attempt + 1))
+                time.sleep(2 * attempt)
                 continue
             raise RuntimeError(f"{method} {url} -> {last_err}") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
             last_err = f"{type(e).__name__}: {e}"
-            if attempt < attempts - 1:
+            attempt += 1
+            if attempt < attempts:
                 print(f"\n  {method} {url} -> {last_err}; retrying", file=sys.stderr)
-                time.sleep(2 * (attempt + 1))
+                time.sleep(2 * attempt)
     raise RuntimeError(f"Giving up on {method} {url} after {attempts} attempt(s); last error: {last_err}")
 
 
@@ -446,13 +450,16 @@ def cmd_match(args) -> None:
     cache_path = wd / "matches.json"
     cache: dict[str, dict] = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     items = src["items"]
-    todo = [i for i in items if i["is_local"] and str(i["pos"]) not in cache]
-    limit = getattr(args, "limit", None)
-    if limit:
-        todo = todo[:limit]
-    remaining = sum(1 for i in items if i["is_local"] and str(i["pos"]) not in cache)
     batch = datetime.date.today().isoformat()
-    todo = carry_unsearched(src, cache, todo, batch)
+    todo = [i for i in items if i["is_local"] and str(i["pos"]) not in cache]
+    before = len(todo)
+    todo = carry_unsearched(src, cache, todo, batch)  # decided elsewhere: no search needed
+    if before - len(todo):
+        print(f"  {before - len(todo)} song(s) decided in another playlist; not searching them")
+    remaining = len(todo)
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        todo = todo[:limit]
     print(f"{len(items)} items; {remaining} local files still to match; doing {len(todo)} now (batch {batch})")
     t0 = time.time()
     stopped: str | None = None
@@ -578,8 +585,15 @@ def load_global() -> dict:
     return json.loads(GLOBAL_APPROVALS.read_text()) if GLOBAL_APPROVALS.exists() else {}
 
 
+def has_identity(it: dict) -> bool:
+    """A standing decision needs a title and an artist; otherwise every metadata-less file would share it."""
+    return bool(norm_title(it["title"])) and bool(norm(it["artist"]))
+
+
 def record_global(it: dict, m: dict, decision: str, playlist: str) -> None:
     """Standing rule: a decision made in one playlist applies to the same song everywhere."""
+    if not has_identity(it):
+        return
     g = load_global()
     g[song_key(it)] = {
         "decision": decision,  # approve | keep_local
@@ -598,7 +612,7 @@ def carry_unsearched(src: dict, cache: dict, todo: list[dict], batch: str) -> li
     g = load_global()
     rest: list[dict] = []
     for it in todo:
-        d = g.get(song_key(it))
+        d = g.get(song_key(it)) if has_identity(it) else None
         if not d:
             rest.append(it)
             continue
@@ -628,7 +642,7 @@ def apply_global(src: dict, cache: dict) -> int:
     n = 0
     for it in src["items"]:
         m = cache.get(str(it["pos"]))
-        d = g.get(song_key(it))
+        d = g.get(song_key(it)) if has_identity(it) else None
         if not m or not d or m.get("approved") is not None or m.get("keep_local"):
             continue
         if m["verdict"] == "match" and d["decision"] != "keep_local":
@@ -646,14 +660,15 @@ def apply_global(src: dict, cache: dict) -> int:
     return n
 
 
-def align_cache(src: dict, cache: dict) -> tuple[int, int, int]:
+def align_cache(src: dict, cache: dict, orphans: list[dict] | None = None) -> tuple[int, int, int]:
     """matches.json is keyed by source position. Each entry also stores the song's key so that
     a re-export of a playlist that changed (insert/delete/reorder) cannot silently attach old
     verdicts and approvals to different songs.
 
     Returns (backfilled, rekeyed, dropped). Entries without a key (written before this check
     existed) are assumed aligned and get one. Entries whose key no longer matches the song at
-    their position are moved to the position that now holds that song, or dropped."""
+    their position are moved to the position that now holds that song, or dropped (and appended
+    to `orphans` if given, so paid-for searches and decisions are never lost silently)."""
     by_pos = {str(it["pos"]): it for it in src["items"]}
     backfilled = rekeyed = dropped = 0
     stale: dict[str, dict] = {}
@@ -680,6 +695,8 @@ def align_cache(src: dict, cache: dict) -> tuple[int, int, int]:
                 rekeyed += 1
             else:
                 dropped += 1
+                if orphans is not None:
+                    orphans.append(dict(m, former_pos=pos))
                 print(f"  WARNING: dropped cached decision for former #{pos} ({m.get('title')}): song no longer in source",
                       file=sys.stderr)
     return backfilled, rekeyed, dropped
@@ -689,9 +706,15 @@ def load_state() -> tuple[Path, dict, dict]:
     wd = current_work()
     src = json.loads((wd / "source.json").read_text())
     cache = json.loads((wd / "matches.json").read_text()) if (wd / "matches.json").exists() else {}
-    backfilled, rekeyed, dropped = align_cache(src, cache)
+    orphans: list[dict] = []
+    backfilled, rekeyed, dropped = align_cache(src, cache, orphans)
     if rekeyed or dropped:
         print(f"  source changed since matching: {rekeyed} cached decision(s) moved, {dropped} dropped", file=sys.stderr)
+    if orphans:
+        op = wd / "matches.orphans.json"
+        old = json.loads(op.read_text()) if op.exists() else []
+        op.write_text(json.dumps(old + orphans, indent=1))
+        print(f"  dropped entries kept in {op}", file=sys.stderr)
     if apply_global(src, cache) or backfilled or rekeyed or dropped:
         (wd / "matches.json").write_text(json.dumps(cache, indent=1))
     return wd, src, cache
@@ -778,8 +801,10 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
         it for it in src["items"]
         if it["is_local"] and not wanted(cache.get(str(it["pos"]))) and not cache.get(str(it["pos"]), {}).get("keep_local")
     ]
-    missing_tracks = [u for u in expected if u not in set(live_spotify)]
-    extra_tracks = sorted(set(live_spotify) - set(expected))
+    live_set = set(live_spotify)
+    missing_tracks = [u for u in expected if u not in live_set]
+    extra_tracks = sorted(live_set - set(expected))
+    non_track = [it for it in src["items"] if not it["is_local"] and not (it["uri"] or "").startswith("spotify:track:")]
     missing_local = [it for it in keep_local if it["uri"] not in live_local]
     return {
         "source_total": len(src["items"]),
@@ -793,6 +818,7 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
         "keep_local": keep_local,
         "missing_local": missing_local,
         "unresolved": unresolved,
+        "non_track": non_track,  # podcast episodes etc.; the API will not add them to a playlist this way
         "complete": not unresolved and not missing_tracks and not extra_tracks and not missing_local,
     }
 
@@ -810,6 +836,10 @@ def cmd_verify(args) -> None:
     print(f"New playlist {res['url']}: {v['live_spotify']} Spotify tracks + {v['live_local']} local files")
     accounted = v["expected"] + len(v["keep_local"]) + v["dupes"]
     print(f"  Decided so far: {v['expected']} Spotify + {len(v['keep_local'])} local + {v['dupes']} collapsed duplicate(s) = {accounted} of {v['source_total']}")
+    if v["non_track"]:
+        print(f"  Not carried over ({len(v['non_track'])} non-track item(s), e.g. podcast episodes):")
+        for it in v["non_track"][:10]:
+            print(f"    - #{it['pos']} {it['title']} — {it['artist']}")
     ok = not v["missing_tracks"] and not v["extra_tracks"]
     print(f"  Spotify tracks expected from decisions: {v['expected']}  {'OK' if ok else 'MISMATCH'}")
     for u in v["missing_tracks"][:20]:
