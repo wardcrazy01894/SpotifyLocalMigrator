@@ -39,7 +39,7 @@ Rebuild the playlist out of real Spotify tracks, **but only where the match is e
 | ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". `build` brings the playlist up to date in place, original order preserved, and never touches local files you have already dragged in. |
 | 🔁 **Decisions carry everywhere** | Approve *Three Little Birds* once and it's approved in every other playlist that has it. |
 | 📅 **Built for the daily grind** | Spotify caps searches per day. `match --limit 400` does a batch and stops; progress is saved every 10 songs. |
-| 🧾 **Completeness check** | `verify` proves every source song is in the new playlist (as a Spotify track or a dragged-in local file) or is a collapsed duplicate, and lists anything undecided. |
+| 🧾 **Completeness check** | `verify` proves every source song is in the new playlist (as a Spotify track or a dragged-in local file) or is a collapsed duplicate, lists anything undecided, and calls out non-track items (podcast episodes) it cannot carry over. |
 | 🪶 **Zero dependencies** | One Python file, standard library only. |
 
 ## 🚀 Setup (one time, ~3 minutes)
@@ -83,7 +83,7 @@ You'll get a breakdown like this:
   "no_match": 5
  }
 }
-Open flags: .../work/pry/flagged.csv
+Open flags: .../work/pry/flagged.csv; this batch: .../work/pry/flagged_2026-10-07.csv
 ```
 
 Reasons you can see: `duration_mismatch`, `title_variant`, `artist_mismatch`, `no_match`, plus the rare `no_duration` (your file has no length) and `no_candidates` (search returned nothing; use `research`).

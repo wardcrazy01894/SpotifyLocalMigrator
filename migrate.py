@@ -1182,7 +1182,10 @@ def main() -> None:
     args = p.parse_args()
     global WORK_OVERRIDE
     WORK_OVERRIDE = args.work
-    args.fn(args)
+    try:
+        args.fn(args)
+    except RateLimited as e:
+        sys.exit(f"{e}. Progress so far is saved; try again later.")
 
 
 if __name__ == "__main__":
