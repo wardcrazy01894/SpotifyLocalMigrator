@@ -78,6 +78,8 @@ def _token_request(data: dict) -> dict:
         tok["refresh_token"] = json.loads(TOKEN_FILE.read_text()).get("refresh_token")
     # Holds the access and refresh tokens: owner-only.
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)  # an existing 0644 file keeps its mode through O_TRUNC
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps(tok))
     TOKEN_FILE.chmod(0o600)
@@ -472,6 +474,8 @@ def cmd_match(args) -> None:
     remaining = len(todo)
     limit = getattr(args, "limit", None)
     if limit is not None:
+        if limit < 0:
+            sys.exit("--limit must be 0 or more")
         todo = todo[:limit]
     print(f"{len(items)} items; {remaining} local files still to match; doing {len(todo)} now (batch {batch})")
     t0 = time.time()
@@ -761,6 +765,9 @@ def cmd_approve(args) -> None:
     recheck = {int(x) for x in filter(None, (args.recheck or "").split(","))}
     unkeep = {int(x) for x in filter(None, (args.unkeep or "").split(","))}
     changed = 0
+    overlap = unkeep & (keep | recheck | positions)
+    if overlap:
+        sys.exit(f"--unkeep overlaps with another option for position(s) {sorted(overlap)}; run it as a separate command first")
     asked = keep | recheck | positions | unkeep
     known = {it["pos"] for it in src["items"] if str(it["pos"]) in cache}
     for pos in sorted(asked - known):
@@ -769,7 +776,21 @@ def cmd_approve(args) -> None:
         m = cache.get(str(it["pos"]))
         if not m:
             continue
-        if it["pos"] in keep:
+        if it["pos"] in unkeep:
+            if not m.get("keep_local"):
+                print(f"  ignored #{it['pos']}: not keep-local", file=sys.stderr)
+                continue
+            forget_global(it)
+            changed += 1
+            if m.get("verdict") == "carried":
+                # never searched here; drop the entry so the next `match` searches it
+                del cache[str(it["pos"])]
+                print(f"  #{it['pos']} will be searched on the next match: {it['title']} — {it['artist']}")
+            else:
+                m.pop("keep_local", None)
+                m.pop("approved", None)
+                print(f"  #{it['pos']} is open again: {it['title']} — {it['artist']}")
+        elif it["pos"] in keep:
             m["approved"] = False
             m["keep_local"] = True
             m.pop("recheck", None)
@@ -779,25 +800,28 @@ def cmd_approve(args) -> None:
             m["recheck"] = True
             changed += 1
         elif m["verdict"] != "match" and (m["verdict"] in reasons or it["pos"] in positions):
+            explicit = it["pos"] in positions
             if m.get("keep_local"):
-                print(f"  ignored #{it['pos']}: already keep-local (use --unkeep to reverse)", file=sys.stderr)
+                if explicit:
+                    print(f"  ignored #{it['pos']}: already keep-local (use --unkeep to reverse)", file=sys.stderr)
             elif not m.get("uri"):
-                print(f"  ignored #{it['pos']}: no candidate to approve; use research --query/--pick", file=sys.stderr)
+                if explicit:
+                    print(f"  ignored #{it['pos']}: no candidate to approve; use research --query/--pick", file=sys.stderr)
             else:
                 m["approved"] = True
                 m.pop("recheck", None)
                 record_global(it, m, "approve", src["name"])
                 changed += 1
                 print(f"  approve #{it['pos']}: {it['title']} — {it['artist']}  ->  {m['title']} — {m['artist']}")
-        elif it["pos"] in unkeep and m.get("keep_local"):
-            m.pop("keep_local", None)
-            m.pop("approved", None)
-            forget_global(it)
-            changed += 1
-            print(f"  #{it['pos']} is open again: {it['title']} — {it['artist']}")
     (wd / "matches.json").write_text(json.dumps(cache, indent=1))
     print(f"{changed} entries updated. Run 'build' to apply.")
     cmd_report(args)
+
+
+def track_id(ref: str) -> str | None:
+    """Accept spotify:track:<id>, open.spotify.com/.../track/<id>?si=..., or a bare 22-char id."""
+    m = re.search(r"track[/:]([A-Za-z0-9]{22})(?![A-Za-z0-9])", ref or "") or re.fullmatch(r"\s*([A-Za-z0-9]{22})\s*", ref or "")
+    return m.group(1) if m else None
 
 
 def cmd_research(args) -> None:
@@ -811,10 +835,10 @@ def cmd_research(args) -> None:
     m = cache.get(str(it["pos"]), {})
     print(f"#{it['pos']}: {it['title']} — {it['artist']} {fmt_dur(it['duration_ms'])}")
     if args.pick:
-        tm = re.search(r"track[/:]([A-Za-z0-9]{22})", args.pick)
-        if not tm:
-            sys.exit(f"--pick needs a spotify:track:<id> uri or an open.spotify.com/track/<id> link, got {args.pick!r}")
-        t = api_get(f"/tracks/{tm.group(1)}", market=MARKET)
+        tid = track_id(args.pick)
+        if not tid:
+            sys.exit(f"--pick needs a spotify:track:<id> uri, an open.spotify.com/track/<id> link or a bare id, got {args.pick!r}")
+        t = api_get(f"/tracks/{tid}", market=MARKET)
         r = evaluate(it, t)
         r["approved"] = True
         r["batch"] = m.get("batch")
