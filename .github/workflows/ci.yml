@@ -9,6 +9,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.12"]
     steps:
@@ -19,9 +20,11 @@ jobs:
       - run: python -m py_compile migrate.py
       - run: pipx run ruff==0.17.0 check migrate.py tests
       - run: python -m unittest discover -s tests -v
-  # Stable name for the branch-protection required check; passes only if every matrix leg passed.
+  # Stable name for the branch-protection required check. `if: always()` makes it run (and fail)
+  # when a matrix leg fails or is cancelled; a skipped job would count as a passing required check.
   check:
+    if: always()
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - run: echo "all test legs passed"
+      - run: test "${{ needs.test.result }}" = success
