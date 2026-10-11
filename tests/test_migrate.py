@@ -156,10 +156,13 @@ class MergePlaylistCalls(unittest.TestCase):
     def test_posts_each_run_with_position(self):
         calls = []
         orig = mg.api_post
+        import contextlib
+        import io
         mg.api_post = lambda path, body: calls.append((path, body)) or {}
         try:
-            mg.merge_playlist("pid", ["spotify:track:A", "spotify:track:B", "spotify:local:z:z:z:1"],
-                              ["spotify:track:A", "spotify:local:z:z:z:1", "spotify:track:OLD"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                mg.merge_playlist("pid", ["spotify:track:A", "spotify:track:B", "spotify:local:z:z:z:1"],
+                                  ["spotify:track:A", "spotify:local:z:z:z:1", "spotify:track:OLD"])
         finally:
             mg.api_post = orig
         self.assertEqual(calls, [("/playlists/pid/items", {"uris": ["spotify:track:B"], "position": 1})])
@@ -289,6 +292,9 @@ class CallRetries(unittest.TestCase):
         def read(self):
             return self.body
 
+        def close(self):
+            pass
+
     def _run(self, method, outcomes):
         import urllib.error
         calls = []
@@ -360,6 +366,105 @@ class PlanMergeFuzz(unittest.TestCase):
             self.assertEqual(sorted(u for _, run in plan for u in run), sorted(want))
             kept = [u for u in sim if u in set(order)]
             self.assertEqual(kept, [u for u in order if u in set(kept)])
+
+
+class GlobalIdentityGuard(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.orig = mg.GLOBAL_APPROVALS
+        mg.GLOBAL_APPROVALS = Path(self.tmp.name) / "approvals.json"
+
+    def tearDown(self):
+        mg.GLOBAL_APPROVALS = self.orig
+        self.tmp.cleanup()
+
+    def test_metadata_less_files_get_no_standing_decision(self):
+        mg.record_global(local(1, "", "", 100), {"uri": None}, "keep_local", "P")
+        mg.record_global(local(2, "Title only", "", 100), {"uri": None}, "keep_local", "P")
+        self.assertFalse(mg.GLOBAL_APPROVALS.exists())
+
+    def test_forget_global_removes_the_decision(self):
+        it = local(1, "A", "a", 100)
+        mg.record_global(it, {"uri": None}, "keep_local", "P")
+        self.assertIn(mg.song_key(it), mg.load_global())
+        mg.forget_global(it)
+        self.assertNotIn(mg.song_key(it), mg.load_global())
+
+
+class TrackId(unittest.TestCase):
+    def test_accepts_uri_link_and_bare_id(self):
+        tid = "5PX4uS1LqlWEPL69phPVQQ"
+        self.assertEqual(mg.track_id(f"spotify:track:{tid}"), tid)
+        self.assertEqual(mg.track_id(f"https://open.spotify.com/track/{tid}?si=abc"), tid)
+        self.assertEqual(mg.track_id(f"https://open.spotify.com/intl-de/track/{tid}"), tid)
+        self.assertEqual(mg.track_id(tid), tid)
+        self.assertIsNone(mg.track_id("spotify:album:" + tid))
+        self.assertIsNone(mg.track_id("not an id"))
+
+
+class ApproveCommand(unittest.TestCase):
+    """cmd_approve against a temporary work dir (no network)."""
+
+    def setUp(self):
+        import contextlib
+        import io
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE)
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = root, root / "approvals.json", "T"
+        wd = root / "t"
+        wd.mkdir()
+        self.src = {"name": "T", "id": "p", "items": [
+            local(0, "A", "a", 100), local(1, "B", "b", 100), local(2, "C", "c", 100)]}
+        (wd / "source.json").write_text(json.dumps(self.src))
+        (wd / "matches.json").write_text(json.dumps({
+            "0": {"verdict": "title_variant", "uri": "spotify:track:A", "keep_local": True, "approved": False, "key": mg.song_key(self.src["items"][0])},
+            "1": {"verdict": "carried", "uri": None, "keep_local": True, "approved": False, "key": mg.song_key(self.src["items"][1]), "carried_from": "P"},
+            "2": {"verdict": "duration_mismatch", "uri": "spotify:track:C", "title": "C", "artist": "c", "key": mg.song_key(self.src["items"][2])},
+        }))
+        mg.GLOBAL_APPROVALS.write_text(json.dumps({
+            mg.song_key(self.src["items"][0]): {"decision": "keep_local", "uri": None, "from_playlist": "T"},
+            mg.song_key(self.src["items"][1]): {"decision": "keep_local", "uri": None, "from_playlist": "P"},
+        }))
+        self.wd = wd
+        self.quiet = contextlib.redirect_stdout(io.StringIO())
+
+    def tearDown(self):
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = self.saved
+        self.tmp.cleanup()
+
+    def _args(self, **kw):
+        import argparse
+        base = {"reasons": None, "pos": None, "keep_local": None, "recheck": None, "unkeep": None, "batch": None}
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _cache(self):
+        return json.loads((self.wd / "matches.json").read_text())
+
+    def test_unkeep_reopens_and_forgets_standing_rule(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(unkeep="0"))
+        c = self._cache()
+        self.assertNotIn("keep_local", c["0"])
+        self.assertNotIn(mg.song_key(self.src["items"][0]), mg.load_global())
+
+    def test_unkeep_on_carried_entry_drops_it_for_resarch(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(unkeep="1"))
+        self.assertNotIn("1", self._cache())
+
+    def test_unkeep_overlapping_another_option_is_refused(self):
+        with self.assertRaises(SystemExit), self.quiet:
+            mg.cmd_approve(self._args(unkeep="0", pos="0"))
+        self.assertTrue(self._cache()["0"]["keep_local"])
+
+    def test_approve_by_reason_skips_keep_local_and_approves_the_rest(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(reasons="duration_mismatch,title_variant"))
+        c = self._cache()
+        self.assertTrue(c["0"]["keep_local"])
+        self.assertTrue(c["2"]["approved"])
 
 
 class RetryAfter(unittest.TestCase):

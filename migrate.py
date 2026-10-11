@@ -45,6 +45,7 @@ SCOPES = (
     "playlist-modify-private playlist-modify-public"
 )
 API = "https://api.spotify.com/v1"
+MARKET = "US"              # search/track market; the token's scopes do not allow market=from_token
 DUR_TOL_MS = 2000          # title+artist+duration within this => added
 DUR_FLAG_MS = 10000        # beyond this we call it a different recording
 
@@ -66,12 +67,22 @@ def _token_request(data: dict) -> dict:
         data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    with urllib.request.urlopen(req) as r:
-        tok = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            tok = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        sys.exit(f"Spotify token request failed ({e.code}): {detail}\nIf the refresh token was revoked, run: python3 migrate.py auth")
     tok["expires_at"] = time.time() + tok.get("expires_in", 3600) - 60
     if "refresh_token" not in tok and TOKEN_FILE.exists():
         tok["refresh_token"] = json.loads(TOKEN_FILE.read_text()).get("refresh_token")
-    TOKEN_FILE.write_text(json.dumps(tok))
+    # Holds the access and refresh tokens: owner-only.
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)  # an existing 0644 file keeps its mode through O_TRUNC
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(tok))
+    TOKEN_FILE.chmod(0o600)
     return tok
 
 
@@ -116,12 +127,14 @@ def cmd_auth(_args) -> None:
     while "code" not in got and "error" not in got and time.time() < deadline:
         time.sleep(0.2)
     srv.server_close()
+    if not got:
+        sys.exit("Timed out waiting for the browser redirect.")
+    if got.get("state") != state:
+        sys.exit("State mismatch on the redirect (another request hit the callback port?); run auth again.")
     if "error" in got:
         sys.exit(f"Spotify returned error: {got['error']}")
     if "code" not in got:
-        sys.exit("Timed out waiting for the browser redirect.")
-    if got.get("state") != state:
-        sys.exit("State mismatch; aborting.")
+        sys.exit("Redirect carried no authorization code.")
     _token_request(
         {
             "grant_type": "authorization_code",
@@ -140,6 +153,8 @@ def access_token() -> str:
         sys.exit("Not logged in. Run: python3 migrate.py auth")
     tok = json.loads(TOKEN_FILE.read_text())
     if time.time() >= tok.get("expires_at", 0):
+        if not tok.get("refresh_token"):
+            sys.exit("Token expired and no refresh token saved. Run: python3 migrate.py auth")
         tok = _token_request(
             {
                 "grant_type": "refresh_token",
@@ -436,7 +451,7 @@ def search_candidates(src: dict) -> list[dict]:
         queries.append(f'track:"{title}"')
     seen: dict[str, dict] = {}
     for q in queries:
-        res = api_get("/search", q=q, type="track", limit=10, market="US")
+        res = api_get("/search", q=q, type="track", limit=10, market=MARKET)
         for t in res.get("tracks", {}).get("items", []):
             seen.setdefault(t["id"], t)
         if any(evaluate(src, t)["verdict"] == "match" for t in seen.values()):
@@ -459,32 +474,36 @@ def cmd_match(args) -> None:
     remaining = len(todo)
     limit = getattr(args, "limit", None)
     if limit is not None:
+        if limit < 0:
+            sys.exit("--limit must be 0 or more")
         todo = todo[:limit]
     print(f"{len(items)} items; {remaining} local files still to match; doing {len(todo)} now (batch {batch})")
     t0 = time.time()
     stopped: str | None = None
-    for n, it in enumerate(todo, 1):
-        try:
-            cands = search_candidates(it)
-        except RateLimited as e:
-            stopped = str(e)
-            break
-        except RuntimeError as e:
-            print(f"\n  search failed for #{it['pos']} {it['title']}: {e}", file=sys.stderr)
-            continue
-        if not cands:
-            cache[str(it["pos"])] = {"verdict": "no_candidates", "score": 0, "uri": None, "batch": batch, "key": song_key(it)}
-        else:
-            order = {"match": 5, "duration_mismatch": 4, "no_duration": 4, "title_variant": 3, "artist_mismatch": 2, "no_match": 1}
-            best = max((evaluate(it, c) for c in cands), key=lambda r: (order[r["verdict"]], r["score"]))
-            best["batch"] = batch
-            best["key"] = song_key(it)
-            cache[str(it["pos"])] = best
-        if n % 10 == 0 or n == len(todo):
-            cache_path.write_text(json.dumps(cache, indent=1))
-            rate = n / max(time.time() - t0, 1e-6)
-            print(f"  {n}/{len(todo)}  ({rate:.1f}/s)", end="\r", flush=True)
-        time.sleep(0.05)
+    failures = 0
+    try:
+        for n, it in enumerate(todo, 1):
+            try:
+                cands = search_candidates(it)
+                failures = 0
+            except RateLimited as e:
+                stopped = str(e)
+                break
+            except RuntimeError as e:
+                failures += 1
+                print(f"\n  search failed for #{it['pos']} {it['title']}: {e}", file=sys.stderr)
+                if failures >= 5:
+                    stopped = f"{failures} consecutive search failures; last: {e}"
+                    break
+                continue
+            _store_best(cache, it, cands, batch)
+            if n % 10 == 0 or n == len(todo):
+                cache_path.write_text(json.dumps(cache, indent=1))
+                rate = n / max(time.time() - t0, 1e-6)
+                print(f"  {n}/{len(todo)}  ({rate:.1f}/s)", end="\r", flush=True)
+            time.sleep(0.05)
+    finally:
+        cache_path.write_text(json.dumps(cache, indent=1))  # never lose paid-for searches
     print()
     carried = apply_global(src, cache)
     if carried:
@@ -493,6 +512,17 @@ def cmd_match(args) -> None:
     if stopped:
         print(f"STOPPED EARLY: {stopped}. Progress is saved; rerun match later.", file=sys.stderr)
     write_reports(wd, src, cache, batch=batch)
+
+
+def _store_best(cache: dict, it: dict, cands: list[dict], batch: str) -> None:
+    if not cands:
+        cache[str(it["pos"])] = {"verdict": "no_candidates", "score": 0, "uri": None, "batch": batch, "key": song_key(it)}
+        return
+    order = {"match": 5, "duration_mismatch": 4, "no_duration": 4, "title_variant": 3, "artist_mismatch": 2, "no_match": 1}
+    best = max((evaluate(it, c) for c in cands), key=lambda r: (order[r["verdict"]], r["score"]))
+    best["batch"] = batch
+    best["key"] = song_key(it)
+    cache[str(it["pos"])] = best
 
 
 def fmt_dur(ms: int | None) -> str:
@@ -637,6 +667,12 @@ def carry_unsearched(src: dict, cache: dict, todo: list[dict], batch: str) -> li
     return rest
 
 
+def forget_global(it: dict) -> None:
+    g = load_global()
+    if g.pop(song_key(it), None) is not None:
+        GLOBAL_APPROVALS.write_text(json.dumps(g, indent=1))
+
+
 def apply_global(src: dict, cache: dict) -> int:
     g = load_global()
     n = 0
@@ -726,13 +762,35 @@ def cmd_approve(args) -> None:
     reasons = set(filter(None, (args.reasons or "").split(",")))
     positions = {int(x) for x in filter(None, (args.pos or "").split(","))}
     keep = {int(x) for x in filter(None, (args.keep_local or "").split(","))}
-    recheck = {int(x) for x in filter(None, (getattr(args, "recheck", None) or "").split(","))}
+    recheck = {int(x) for x in filter(None, (args.recheck or "").split(","))}
+    unkeep = {int(x) for x in filter(None, (args.unkeep or "").split(","))}
     changed = 0
+    overlap = unkeep & (keep | recheck | positions)
+    if overlap:
+        sys.exit(f"--unkeep overlaps with another option for position(s) {sorted(overlap)}; run it as a separate command first")
+    asked = keep | recheck | positions | unkeep
+    known = {it["pos"] for it in src["items"] if str(it["pos"]) in cache}
+    for pos in sorted(asked - known):
+        print(f"  ignored #{pos}: not in the source, or not searched yet", file=sys.stderr)
     for it in src["items"]:
         m = cache.get(str(it["pos"]))
         if not m:
             continue
-        if it["pos"] in keep:
+        if it["pos"] in unkeep:
+            if not m.get("keep_local"):
+                print(f"  ignored #{it['pos']}: not keep-local", file=sys.stderr)
+                continue
+            forget_global(it)
+            changed += 1
+            if m.get("verdict") == "carried":
+                # never searched here; drop the entry so the next `match` searches it
+                del cache[str(it["pos"])]
+                print(f"  #{it['pos']} will be searched on the next match: {it['title']} — {it['artist']}")
+            else:
+                m.pop("keep_local", None)
+                m.pop("approved", None)
+                print(f"  #{it['pos']} is open again: {it['title']} — {it['artist']}")
+        elif it["pos"] in keep:
             m["approved"] = False
             m["keep_local"] = True
             m.pop("recheck", None)
@@ -741,8 +799,15 @@ def cmd_approve(args) -> None:
         elif it["pos"] in recheck:
             m["recheck"] = True
             changed += 1
-        elif m["verdict"] != "match" and (m["verdict"] in reasons or it["pos"] in positions) and m.get("uri"):
-            if not m.get("keep_local"):
+        elif m["verdict"] != "match" and (m["verdict"] in reasons or it["pos"] in positions):
+            explicit = it["pos"] in positions
+            if m.get("keep_local"):
+                if explicit:
+                    print(f"  ignored #{it['pos']}: already keep-local (use --unkeep to reverse)", file=sys.stderr)
+            elif not m.get("uri"):
+                if explicit:
+                    print(f"  ignored #{it['pos']}: no candidate to approve; use research --query/--pick", file=sys.stderr)
+            else:
                 m["approved"] = True
                 m.pop("recheck", None)
                 record_global(it, m, "approve", src["name"])
@@ -753,14 +818,27 @@ def cmd_approve(args) -> None:
     cmd_report(args)
 
 
+def track_id(ref: str) -> str | None:
+    """Accept spotify:track:<id>, open.spotify.com/.../track/<id>?si=..., or a bare 22-char id."""
+    m = re.search(r"track[/:]([A-Za-z0-9]{22})(?![A-Za-z0-9])", ref or "") or re.fullmatch(r"\s*([A-Za-z0-9]{22})\s*", ref or "")
+    return m.group(1) if m else None
+
+
 def cmd_research(args) -> None:
     """Re-search one flagged song with a hand-written query (e.g. 'I See Fire Kygo remix')."""
     wd, src, cache = load_state()
+    if not 0 <= args.pos < len(src["items"]):
+        sys.exit(f"--pos must be between 0 and {len(src['items']) - 1} (the # in flagged.csv)")
     it = src["items"][args.pos]
+    if not it["is_local"]:
+        sys.exit(f"#{args.pos} is already a Spotify track; nothing to research.")
     m = cache.get(str(it["pos"]), {})
     print(f"#{it['pos']}: {it['title']} — {it['artist']} {fmt_dur(it['duration_ms'])}")
     if args.pick:
-        t = api_get(f"/tracks/{args.pick.split(':')[-1]}", market="US")
+        tid = track_id(args.pick)
+        if not tid:
+            sys.exit(f"--pick needs a spotify:track:<id> uri, an open.spotify.com/track/<id> link or a bare id, got {args.pick!r}")
+        t = api_get(f"/tracks/{tid}", market=MARKET)
         r = evaluate(it, t)
         r["approved"] = True
         r["batch"] = m.get("batch")
@@ -769,7 +847,7 @@ def cmd_research(args) -> None:
         record_global(it, r, "approve", src["name"])
         print(f"  picked: {r['title']} — {r['artist']} {fmt_dur(r['duration_ms'])} ({r['verdict']})")
     else:
-        res = api_get("/search", q=args.query, type="track", limit=10, market="US")
+        res = api_get("/search", q=args.query, type="track", limit=10, market=MARKET)
         cands = sorted((evaluate(it, t) for t in res.get("tracks", {}).get("items", [])), key=lambda r: -r["score"])
         for r in cands[:8]:
             print(f"  {r['verdict']:17} {r['score']:3}  {r['title']} — {r['artist']} [{r['album']}] {fmt_dur(r['duration_ms'])}  {r['uri']}")
@@ -784,7 +862,9 @@ def cmd_research(args) -> None:
             print(f"  -> stored {best['title']} ({best['verdict']}{', approved' if best.get('approved') else ''})")
         elif cands:
             print("  -> nothing stored (no exact match; use --take to accept the top result, or --pick <uri>)")
-    cache[str(it["pos"])].pop("recheck", None) if cache.get(str(it["pos"]), {}).get("verdict") == "match" or cache.get(str(it["pos"]), {}).get("approved") else None
+    final = cache.get(str(it["pos"]), {})
+    if final.get("verdict") == "match" or final.get("approved"):
+        final.pop("recheck", None)  # resolved; no longer open
     (wd / "matches.json").write_text(json.dumps(cache, indent=1))
 
 
@@ -1059,11 +1139,13 @@ def main() -> None:
     ap.add_argument("--pos", help="comma list of source positions (from flagged.csv)")
     ap.add_argument("--keep-local", help="comma list of positions to never add")
     ap.add_argument("--recheck", help="comma list of positions to re-search by hand later (tracked, stays open)")
+    ap.add_argument("--unkeep", help="comma list of keep-local positions to reopen (also forgets the standing decision)")
     ap.set_defaults(fn=cmd_approve)
     rs = sub.add_parser("research", help="re-search one song with a custom query, or pick a specific track uri")
-    rs.add_argument("--pos", type=int, required=True)
-    rs.add_argument("--query")
-    rs.add_argument("--pick", help="spotify:track:... to accept for this song")
+    rs.add_argument("--pos", type=int, required=True, help="source position (the # in flagged.csv)")
+    how = rs.add_mutually_exclusive_group(required=True)
+    how.add_argument("--query", help="hand-written search, e.g. 'I See Fire Kygo remix'")
+    how.add_argument("--pick", help="spotify:track:<id> or track link to accept for this song")
     rs.add_argument("--take", action="store_true", help="accept the top result even if not an exact match")
     rs.set_defaults(fn=cmd_research)
     sub.add_parser("verify", help="check the new playlist accounts for every source song").set_defaults(fn=cmd_verify)
