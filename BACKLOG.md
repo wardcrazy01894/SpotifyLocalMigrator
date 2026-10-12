@@ -15,7 +15,7 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 | Playlist | Songs | Status |
 |---|---|---|
-| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day. Daily Spotify search budget: 423 songs + ~30 re-searches (2026-10-08), 485 + 23 (2026-10-10), 487 + 8 (2026-10-11) before a 429; rolling 24 h window from the day's first search, currently opens ~13:49. 2026-10-11 end: 2121 searched, 1953 on Spotify (1949 tracks + 4 collapsed duplicates), 148 keep-local, 7 B2 flags awaiting the user (pos 1564,1635,1655,1808,1834,1838,1946), 13 rechecks for tomorrow (pos 1639,1640,1642,1833,1867,1923,1935,1953,2004,2020,2038,2061,2072). |
+| iPhone | 3262 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — day by day. Daily Spotify search budget: 423 songs + ~30 re-searches (2026-10-08), 485 + 23 (2026-10-10), 487 + 8 (2026-10-11) before a 429; rolling 24 h window from the day's first search, currently opens ~13:49. 2026-10-11 end: 2121 searched, 1953 on Spotify (1949 tracks + 4 collapsed duplicates), 155 keep-local (all B2 kept local), 0 open flags, 13 rechecks for tomorrow (pos 1639,1640,1642,1833,1867,1923,1935,1953,2004,2020,2038,2061,2072). |
 
 Daily loop: `python3 migrate.py -w iPhone match --limit 400` → `build` → review `work/iphone/flagged_<date>.csv` →
 `approve --pos ... --keep-local ... --recheck ...` → `build` → `verify`.
