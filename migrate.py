@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bisect
 import csv
 import datetime
 import hashlib
@@ -1066,8 +1067,6 @@ def merge_playlist(playlist_id: str, order: list[str], live: list[str]) -> None:
 
 def _lis_members(seq: list[int]) -> set[int]:
     """Indices into `seq` of one longest strictly increasing subsequence (patience sorting)."""
-    import bisect
-
     tails: list[int] = []  # values
     tails_idx: list[int] = []  # index in seq of each tail
     prev: list[int] = [-1] * len(seq)
@@ -1105,7 +1104,8 @@ def plan_reorder(order: list[str], live: list[str]) -> list[tuple[int, int]]:
         first_pos.setdefault(u, idx)
     target = [u for u in order if u in first_pos]
     keep = _lis_members([first_pos[u] for u in target])
-    sim = list(live)
+    # Non-first copies get a unique placeholder so sim.index() always finds the tracked copy.
+    sim = [u if first_pos.get(u) == i else f"\0dup{i}" for i, u in enumerate(live)]
     moves: list[tuple[int, int]] = []
     for i, u in enumerate(target):
         if i in keep:

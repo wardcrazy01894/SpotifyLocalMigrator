@@ -224,6 +224,14 @@ class PlanReorder(unittest.TestCase):
         self.assertEqual(self._ordered_part(order, final), order)
         self.assertEqual(sorted(final), sorted(live))
 
+    def test_duplicate_copy_does_not_confuse_predecessor_lookup(self):
+        order = ["spotify:track:A", "spotify:track:E", "spotify:track:F", "spotify:track:B", "spotify:track:G"]
+        live = ["spotify:track:B", "spotify:track:B", "spotify:track:G", "spotify:track:A", "spotify:track:E", "spotify:track:F"]
+        moves = mg.plan_reorder(order, live)
+        self.assertEqual(moves, [(0, 6), (1, 6)])
+        # The tracked (first) copy of B is placed; the stray second copy stays where it was.
+        self.assertEqual(self._apply(live, moves), ["spotify:track:B", "spotify:track:A", "spotify:track:E", "spotify:track:F", "spotify:track:B", "spotify:track:G"])
+
     def test_large_pasted_tail_is_linear_in_displaced_items(self):
         tracks = [f"spotify:track:{i:04d}" for i in range(2000)]
         locals_ = [f"spotify:local:x:y:L{i}:1" for i in range(150)]
