@@ -152,6 +152,62 @@ class PlanMerge(unittest.TestCase):
         self.assertEqual(mg.plan_merge(["spotify:local:a:b:c:1", "spotify:track:A"], ["spotify:track:A"]), [])
 
 
+class PlanReorder(unittest.TestCase):
+    L = [f"spotify:local:x:y:L{i}:100" for i in range(4)]
+
+    def _apply(self, live, moves):
+        sim = list(live)
+        for start, before in moves:
+            sim.insert(before, sim.pop(start))
+        return sim
+
+    def test_already_in_order(self):
+        self.assertEqual(mg.plan_reorder(["spotify:track:A", self.L[0], "spotify:track:B"], ["spotify:track:A", self.L[0], "spotify:track:B"]), [])
+
+    def test_appended_local_files_move_to_source_positions(self):
+        order = [self.L[0], "spotify:track:A", self.L[1], "spotify:track:B", "spotify:track:C", self.L[2]]
+        live = ["spotify:track:A", "spotify:track:B", "spotify:track:C", self.L[0], self.L[1], self.L[2]]
+        moves = mg.plan_reorder(order, live)
+        self.assertEqual(moves, [(3, 0), (4, 2)])
+        self.assertEqual(self._apply(live, moves), order)
+
+    def test_moves_are_sequential_against_the_running_state(self):
+        order = ["spotify:track:A", "spotify:track:B", "spotify:track:C", "spotify:track:D"]
+        live = ["spotify:track:D", "spotify:track:C", "spotify:track:B", "spotify:track:A"]
+        moves = mg.plan_reorder(order, live)
+        self.assertEqual(self._apply(live, moves), order)
+        for start, before in moves:
+            self.assertGreater(start, before)
+
+    def test_extras_and_absent_items_are_left_alone(self):
+        order = ["spotify:track:A", "spotify:track:MISSING", self.L[0], "spotify:track:B"]
+        live = ["spotify:track:EXTRA", "spotify:track:B", "spotify:track:A", self.L[0]]
+        moves = mg.plan_reorder(order, live)
+        self.assertEqual(self._apply(live, moves), ["spotify:track:A", self.L[0], "spotify:track:B", "spotify:track:EXTRA"])
+
+    def test_duplicate_live_entries_position_the_first_only(self):
+        order = ["spotify:track:A", "spotify:track:B"]
+        live = ["spotify:track:B", "spotify:track:A", "spotify:track:B"]
+        moves = mg.plan_reorder(order, live)
+        self.assertEqual(self._apply(live, moves), ["spotify:track:A", "spotify:track:B", "spotify:track:B"])
+
+
+class ReorderPlaylistCalls(unittest.TestCase):
+    def test_puts_each_move(self):
+        calls = []
+        orig = mg._call
+        mg._call = lambda method, path, params=None, body=None: calls.append((method, path, body)) or {}
+        try:
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                n = mg.reorder_playlist("PID", ["spotify:track:A", "spotify:track:B"], ["spotify:track:B", "spotify:track:A"])
+        finally:
+            mg._call = orig
+        self.assertEqual(n, 1)
+        self.assertEqual(calls, [("PUT", "/playlists/PID/items", {"range_start": 1, "insert_before": 0, "range_length": 1})])
+
+
 class MergePlaylistCalls(unittest.TestCase):
     def test_posts_each_run_with_position(self):
         calls = []

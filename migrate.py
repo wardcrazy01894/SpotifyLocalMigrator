@@ -1058,6 +1058,35 @@ def merge_playlist(playlist_id: str, order: list[str], live: list[str]) -> None:
             print(f"    - https://open.spotify.com/track/{u.split(':')[-1]}")
 
 
+def plan_reorder(order: list[str], live: list[str]) -> list[tuple[int, int]]:
+    """Pure part of putting the playlist back in source order after local files were pasted in
+    (the app appends them at the end). Returns single-item moves (range_start, insert_before)
+    for the reorder endpoint, in sequence; each is expressed against the playlist as it is after
+    the earlier moves. Items that are not in `order` (stray extras) are never moved and end up
+    after everything that is."""
+    present = set(live)
+    target = [u for u in order if u in present]
+    sim = list(live)
+    moves: list[tuple[int, int]] = []
+    for i, u in enumerate(target):
+        cur = sim.index(u)
+        if cur != i:
+            moves.append((cur, i))
+            sim.insert(i, sim.pop(cur))
+    return moves
+
+
+def reorder_playlist(playlist_id: str, order: list[str], live: list[str]) -> int:
+    """Apply plan_reorder with one reorder call per move. Returns the number of moves made."""
+    moves = plan_reorder(order, live)
+    for n, (start, before) in enumerate(moves, 1):
+        _call("PUT", f"/playlists/{playlist_id}/items", body={"range_start": start, "insert_before": before, "range_length": 1})
+        print(f"  moved {n}/{len(moves)}", end="\r", flush=True)
+    if moves:
+        print(f"  moved {len(moves)} item(s) back into source order.")
+    return len(moves)
+
+
 def cmd_build(args) -> None:
     wd, src, cache = load_state()
     uris, dupes = desired_uris(src, cache, args.keep_duplicates)
@@ -1074,13 +1103,21 @@ def cmd_build(args) -> None:
         print(f"{mode} '{pl['name']}' with {len(uris)} tracks ({dupes} duplicate(s) collapsed) ...")
         if args.dry_run:
             if has_local:
-                plan = plan_merge(full_order(src, cache), live)
-                print(f"  dry run: would insert {sum(len(r) for _, r in plan)} track(s) in {len(plan)} call(s)")
+                order = full_order(src, cache)
+                plan = plan_merge(order, live)
+                sim = list(live)
+                for pos, run in plan:
+                    sim[pos:pos] = run
+                moves = plan_reorder(order, sim)
+                print(f"  dry run: would insert {sum(len(r) for _, r in plan)} track(s) in {len(plan)} call(s), then move {len(moves)} item(s)")
             return
         if has_local:
             # Local files have been dragged in by hand; a full replace would drop them
             # (the API cannot add local files). Merge instead, inserting new tracks in order.
-            merge_playlist(pl["id"], full_order(src, cache), live)
+            order = full_order(src, cache)
+            merge_playlist(pl["id"], order, live)
+            # Pasted/dragged local files land at the end; move everything back into source order.
+            reorder_playlist(pl["id"], order, live_uris(pl["id"]))
         else:
             _call("PUT", f"/playlists/{pl['id']}/items", body={"uris": uris[:100]})
             for i in range(100, len(uris), 100):
