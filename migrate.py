@@ -938,8 +938,14 @@ def cmd_verify(args) -> None:
     print(f"  Local files to drag in by hand: {len(v['keep_local'])}  (present now: {v['live_local']})")
     if len(v["missing_local"]) != len(v["keep_local"]):
         print(f"  Still missing: {len(v['missing_local'])}")
-    for it in v["missing_local"]:
+    for it in v["missing_local"][:20]:
         print(f"    - #{it['pos']} {it['title']} — {it['artist']}")
+    if len(v["missing_local"]) > 20:
+        print(f"    ... and {len(v['missing_local']) - 20} more")
+    if v["missing_local"]:
+        paste = wd / "paste_local.txt"
+        paste.write_text("".join(it["uri"] + "\n" for it in v["missing_local"]))
+        print(f"  Paste list: {paste}  (copy it, open the new playlist in the desktop app, click an empty spot, Cmd+V, then `build`)")
     unresolved = v["unresolved"]
     print(f"  Unresolved (not yet decided or searched): {len(unresolved)}")
     for it in unresolved[:40]:
@@ -1058,29 +1064,73 @@ def merge_playlist(playlist_id: str, order: list[str], live: list[str]) -> None:
             print(f"    - https://open.spotify.com/track/{u.split(':')[-1]}")
 
 
+def _lis_members(seq: list[int]) -> set[int]:
+    """Indices into `seq` of one longest strictly increasing subsequence (patience sorting)."""
+    import bisect
+
+    tails: list[int] = []  # values
+    tails_idx: list[int] = []  # index in seq of each tail
+    prev: list[int] = [-1] * len(seq)
+    for i, v in enumerate(seq):
+        k = bisect.bisect_left(tails, v)
+        if k == len(tails):
+            tails.append(v)
+            tails_idx.append(i)
+        else:
+            tails[k] = v
+            tails_idx[k] = i
+        prev[i] = tails_idx[k - 1] if k else -1
+    out: set[int] = set()
+    i = tails_idx[-1] if tails_idx else -1
+    while i != -1:
+        out.add(i)
+        i = prev[i]
+    return out
+
+
 def plan_reorder(order: list[str], live: list[str]) -> list[tuple[int, int]]:
     """Pure part of putting the playlist back in source order after local files were pasted in
     (the app appends them at the end). Returns single-item moves (range_start, insert_before)
     for the reorder endpoint, in sequence; each is expressed against the playlist as it is after
-    the earlier moves. Items that are not in `order` (stray extras) are never moved and end up
-    after everything that is."""
-    present = set(live)
-    target = [u for u in order if u in present]
+    the earlier moves, with the endpoint's own semantics (indices are taken before the move, so a
+    move forward lands at insert_before - 1).
+
+    Minimal: items already in increasing order relative to each other (a longest increasing
+    subsequence) stay put; every other item is moved to sit right after its predecessor in
+    `order`. `live` may contain duplicates and empty entries; only the first copy of an item is
+    positioned. Items not in `order` (strays, extra copies) are never moved, so they can stay
+    interleaved; `merge_playlist` lists unwanted Spotify tracks for removal by hand."""
+    first_pos: dict[str, int] = {}
+    for idx, u in enumerate(live):
+        first_pos.setdefault(u, idx)
+    target = [u for u in order if u in first_pos]
+    keep = _lis_members([first_pos[u] for u in target])
     sim = list(live)
     moves: list[tuple[int, int]] = []
     for i, u in enumerate(target):
+        if i in keep:
+            continue
         cur = sim.index(u)
-        if cur != i:
-            moves.append((cur, i))
-            sim.insert(i, sim.pop(cur))
+        before = sim.index(target[i - 1]) + 1 if i else 0
+        if cur == before:
+            continue
+        moves.append((cur, before))
+        sim.pop(cur)
+        sim.insert(before - 1 if cur < before else before, u)
     return moves
 
 
 def reorder_playlist(playlist_id: str, order: list[str], live: list[str]) -> int:
-    """Apply plan_reorder with one reorder call per move. Returns the number of moves made."""
+    """Apply plan_reorder with one reorder call per move, chaining snapshot ids so a playlist
+    edited elsewhere mid-run makes Spotify reject the stale move instead of moving the wrong
+    item. Returns the number of moves made. Do not edit the playlist while this runs."""
     moves = plan_reorder(order, live)
+    snapshot: str | None = None
     for n, (start, before) in enumerate(moves, 1):
-        _call("PUT", f"/playlists/{playlist_id}/items", body={"range_start": start, "insert_before": before, "range_length": 1})
+        body: dict = {"range_start": start, "insert_before": before, "range_length": 1}
+        if snapshot:
+            body["snapshot_id"] = snapshot
+        snapshot = _call("PUT", f"/playlists/{playlist_id}/items", body=body).get("snapshot_id") or None
         print(f"  moved {n}/{len(moves)}", end="\r", flush=True)
     if moves:
         print(f"  moved {len(moves)} item(s) back into source order.")

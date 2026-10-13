@@ -156,13 +156,31 @@ class PlanReorder(unittest.TestCase):
     L = [f"spotify:local:x:y:L{i}:100" for i in range(4)]
 
     def _apply(self, live, moves):
+        """Simulate the Spotify reorder endpoint: indices are taken before the move."""
         sim = list(live)
         for start, before in moves:
-            sim.insert(before, sim.pop(start))
+            self.assertTrue(0 <= start < len(sim) and 0 <= before <= len(sim), (start, before, sim))
+            self.assertNotEqual(start, before)
+            u = sim.pop(start)
+            sim.insert(before - 1 if start < before else before, u)
         return sim
+
+    def _ordered_part(self, order, final):
+        s = set(order)
+        seen = set()
+        out = []
+        for u in final:
+            if u in s and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
 
     def test_already_in_order(self):
         self.assertEqual(mg.plan_reorder(["spotify:track:A", self.L[0], "spotify:track:B"], ["spotify:track:A", self.L[0], "spotify:track:B"]), [])
+
+    def test_empty_inputs(self):
+        self.assertEqual(mg.plan_reorder([], ["spotify:track:A"]), [])
+        self.assertEqual(mg.plan_reorder(["spotify:track:A"], []), [])
 
     def test_appended_local_files_move_to_source_positions(self):
         order = [self.L[0], "spotify:track:A", self.L[1], "spotify:track:B", "spotify:track:C", self.L[2]]
@@ -171,41 +189,76 @@ class PlanReorder(unittest.TestCase):
         self.assertEqual(moves, [(3, 0), (4, 2)])
         self.assertEqual(self._apply(live, moves), order)
 
-    def test_moves_are_sequential_against_the_running_state(self):
+    def test_full_reversal_ends_in_order(self):
         order = ["spotify:track:A", "spotify:track:B", "spotify:track:C", "spotify:track:D"]
-        live = ["spotify:track:D", "spotify:track:C", "spotify:track:B", "spotify:track:A"]
+        live = list(reversed(order))
         moves = mg.plan_reorder(order, live)
+        self.assertEqual(len(moves), 3)
         self.assertEqual(self._apply(live, moves), order)
-        for start, before in moves:
-            self.assertGreater(start, before)
+
+    def test_one_displaced_item_costs_one_move(self):
+        order = ["spotify:track:A", "spotify:track:B", "spotify:track:C", self.L[0]]
+        live = [self.L[0], "spotify:track:A", "spotify:track:B", "spotify:track:C"]
+        moves = mg.plan_reorder(order, live)
+        self.assertEqual(moves, [(0, 4)])
+        self.assertEqual(self._apply(live, moves), order)
+
+    def test_stray_at_front_costs_nothing(self):
+        order = ["spotify:track:A", "spotify:track:B", "spotify:track:C"]
+        live = ["spotify:track:EXTRA", "spotify:track:A", "spotify:track:B", "", "spotify:track:C"]
+        self.assertEqual(mg.plan_reorder(order, live), [])
 
     def test_extras_and_absent_items_are_left_alone(self):
         order = ["spotify:track:A", "spotify:track:MISSING", self.L[0], "spotify:track:B"]
         live = ["spotify:track:EXTRA", "spotify:track:B", "spotify:track:A", self.L[0]]
         moves = mg.plan_reorder(order, live)
-        self.assertEqual(self._apply(live, moves), ["spotify:track:A", self.L[0], "spotify:track:B", "spotify:track:EXTRA"])
+        final = self._apply(live, moves)
+        self.assertEqual(self._ordered_part(order, final), ["spotify:track:A", self.L[0], "spotify:track:B"])
+        self.assertIn("spotify:track:EXTRA", final)
 
     def test_duplicate_live_entries_position_the_first_only(self):
-        order = ["spotify:track:A", "spotify:track:B"]
-        live = ["spotify:track:B", "spotify:track:A", "spotify:track:B"]
+        order = ["spotify:track:A", self.L[0], "spotify:track:B"]
+        live = ["spotify:track:B", self.L[0], "spotify:track:A", self.L[0], "spotify:track:B"]
         moves = mg.plan_reorder(order, live)
-        self.assertEqual(self._apply(live, moves), ["spotify:track:A", "spotify:track:B", "spotify:track:B"])
+        final = self._apply(live, moves)
+        self.assertEqual(self._ordered_part(order, final), order)
+        self.assertEqual(sorted(final), sorted(live))
+
+    def test_large_pasted_tail_is_linear_in_displaced_items(self):
+        tracks = [f"spotify:track:{i:04d}" for i in range(2000)]
+        locals_ = [f"spotify:local:x:y:L{i}:1" for i in range(150)]
+        order = []
+        for i, u in enumerate(tracks):
+            order.append(u)
+            if i % 13 == 0 and i // 13 < len(locals_):
+                order.append(locals_[i // 13])
+        live = tracks + locals_
+        moves = mg.plan_reorder(order, live)
+        self.assertEqual(len(moves), len(locals_))
+        self.assertEqual(self._apply(live, moves), order)
 
 
 class ReorderPlaylistCalls(unittest.TestCase):
-    def test_puts_each_move(self):
+    def test_puts_each_move_and_chains_snapshot_ids(self):
         calls = []
         orig = mg._call
-        mg._call = lambda method, path, params=None, body=None: calls.append((method, path, body)) or {}
+
+        def fake(method, path, params=None, body=None):
+            calls.append((method, path, dict(body)))
+            return {"snapshot_id": f"snap{len(calls)}"}
+
+        mg._call = fake
         try:
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                n = mg.reorder_playlist("PID", ["spotify:track:A", "spotify:track:B"], ["spotify:track:B", "spotify:track:A"])
+                n = mg.reorder_playlist("PID", ["spotify:track:A", "spotify:track:B", "spotify:track:C"], ["spotify:track:C", "spotify:track:B", "spotify:track:A"])
         finally:
             mg._call = orig
-        self.assertEqual(n, 1)
-        self.assertEqual(calls, [("PUT", "/playlists/PID/items", {"range_start": 1, "insert_before": 0, "range_length": 1})])
+        self.assertEqual(n, 2)
+        self.assertEqual([c[0:2] for c in calls], [("PUT", "/playlists/PID/items")] * 2)
+        self.assertNotIn("snapshot_id", calls[0][2])
+        self.assertEqual(calls[1][2]["snapshot_id"], "snap1")
 
 
 class MergePlaylistCalls(unittest.TestCase):

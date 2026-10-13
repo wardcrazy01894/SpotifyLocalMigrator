@@ -36,7 +36,7 @@ Rebuild the playlist out of real Spotify tracks, **but only where the match is e
 |---|---|
 | 🎯 **Strict matching** | Same title, same artist, same length. Case, punctuation, accents and leading track numbers are ignored. |
 | 🚩 **Every mismatch flagged with a reason** | `duration_mismatch`, `title_variant`, `artist_mismatch`, `no_match`, each with the closest Spotify track shown next to it. |
-| ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". `build` brings the playlist up to date in place, original order preserved, and never touches local files you have already dragged in. |
+| ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". `build` brings the playlist up to date in place, original order preserved; local files you have pasted or dragged in are kept and moved to their place in the order, never removed. |
 | 🔁 **Decisions carry everywhere** | Approve *Three Little Birds* once and it's approved in every other playlist that has it. |
 | 📅 **Built for the daily grind** | Spotify caps searches per day. `match --limit 400` does a batch and stops; progress is saved every 10 songs. |
 | 🧾 **Completeness check** | `verify` proves every source song is in the new playlist (as a Spotify track or a dragged-in local file) or is a collapsed duplicate, lists anything undecided, and calls out non-track items (podcast episodes) it cannot carry over. |
@@ -116,7 +116,7 @@ New playlist https://open.spotify.com/playlist/…: 107 Spotify tracks + 5 local
 COMPLETE: every source song is accounted for in the new playlist.
 ```
 
-`build` has two modes. Until you drag a local file into the new playlist it rewrites the whole thing, so order is exact. Once a local file is present (the API cannot add those back), it merges instead: missing tracks are inserted at their place in the source order, and tracks you have since un-approved are listed for you to remove by hand.
+`build` has two modes. Until a local file is in the new playlist it rewrites the whole thing, so order is exact. Once a local file is present (the API cannot add those back), it merges instead: missing tracks are inserted at their place in the source order, every item that is out of place (pasted local files land at the end) is moved back to its source position with one reorder call each, and tracks you have since un-approved are listed for you to remove by hand. Don't edit the playlist in the app while `build` runs.
 
 ### 📅 Big playlist? Do it in days
 
@@ -133,7 +133,7 @@ python3 migrate.py -w iPhone build                # playlist grows a bit
 ## ✋ Two things only a human can do
 
 - **Folders.** The Web API has no concept of playlist folders. Make the folder in the desktop app and drag the new playlist in.
-- **Local files.** Drag the keep-local songs from the old playlist into the new one in the desktop app. `verify` counts them.
+- **Local files.** Paste their URIs into the new playlist in the desktop app: `verify` writes the ones still missing to `work/<playlist>/paste_local.txt` (`spotify:local:…` URIs, one per line); copy its contents, open the new playlist, click an empty spot and press Cmd+V. All of them land in one paste, at the end; the next `build` moves them into place. Dragging them from the old playlist works too. `verify` counts them.
 
 ## 🔬 Matching details
 
@@ -172,6 +172,7 @@ Several endpoints were renamed and the old ones now return 403:
 | `work/<playlist>/flagged_<date>.csv` | just that day's batch |
 | `work/<playlist>/result.json` | id, URL and counts of the playlist that was built |
 | `work/<playlist>/summary.json` | the breakdown printed after `match`, `approve` and `report` |
+| `work/<playlist>/paste_local.txt` | written by `verify`: local files still to paste into the new playlist |
 | `work/current` | which playlist commands act on when `-w` is not given |
 | `BACKLOG.md` | which playlists are done, in progress and queued |
 
