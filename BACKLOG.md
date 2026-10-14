@@ -21,10 +21,12 @@ Daily loop: `python3 migrate.py -w iPhone match --limit 400` → `build` → rev
 `approve --pos ... --keep-local ... --recheck ...` → `build` → `verify`.
 
 Standing rules:
-- A decision (approve / keep local) made for a song in one playlist applies to the same song in every playlist (`work/approvals.json`).
+- A decision (approve / keep local) made for a song in one playlist applies to the same song in every playlist (`work/approvals.json`); exact matches found in any playlist are reused too (PR #8), so only unseen songs cost a search.
 - A playlist is only done when `verify` says COMPLETE: source count == Spotify tracks in the new playlist + local files dragged in by hand.
 
-## Queued (do not start without approval)
+## Queued (approved 2026-10-13 to start on 2026-10-14, after iPhone's searching is finished)
+
+Order for each: `export "name:<Playlist>"` → `match --limit 0` (offline: shows how many songs still need a search after carry-over from iPhone/Pry) → `build --name "<Playlist> (Spotify version)"` with what is known → search the rest within the day's budget → flags → `build` → paste local files → `verify`.
 
 | Playlist | Songs |
 |---|---|
