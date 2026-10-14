@@ -352,11 +352,12 @@ class CacheAlignment(unittest.TestCase):
 class GlobalDecisions(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.orig = mg.GLOBAL_APPROVALS
+        self.orig = (mg.GLOBAL_APPROVALS, mg.WORK_ROOT)  # WORK_ROOT too: carry-over reads other work dirs
         mg.GLOBAL_APPROVALS = Path(self.tmp.name) / "approvals.json"
+        mg.WORK_ROOT = Path(self.tmp.name)
 
     def tearDown(self):
-        mg.GLOBAL_APPROVALS = self.orig
+        mg.GLOBAL_APPROVALS, mg.WORK_ROOT = self.orig
         self.tmp.cleanup()
 
     def test_carry_unsearched_skips_search_for_decided_songs(self):
@@ -364,7 +365,8 @@ class GlobalDecisions(unittest.TestCase):
         mg.record_global(it_a, {"uri": "spotify:track:A"}, "approve", "Other")
         mg.record_global(it_b, {"uri": "spotify:track:X"}, "keep_local", "Other")
         cache = {}
-        rest = mg.carry_unsearched({"items": [it_a, it_b]}, cache, [it_a, it_b, local(3, "C", "c", 1)], "2026-01-01")
+        rest, decided, matched = mg.carry_unsearched({"items": [it_a, it_b]}, cache, [it_a, it_b, local(3, "C", "c", 1)], "2026-01-01")
+        self.assertEqual((decided, matched), (2, 0))
         self.assertEqual([i["pos"] for i in rest], [3])
         self.assertTrue(mg.wanted(cache["1"]))
         self.assertTrue(cache["2"]["keep_local"])
@@ -381,7 +383,7 @@ class GlobalDecisions(unittest.TestCase):
     def test_legacy_identity_less_key_is_not_applied(self):
         it = local(1, "John Blend", "", 314)
         mg.GLOBAL_APPROVALS.write_text(json.dumps({mg.song_key(it): {"decision": "keep_local", "uri": None, "from_playlist": "P"}}))
-        self.assertEqual(mg.carry_unsearched({"items": [it]}, {}, [it], "d"), [it])
+        self.assertEqual(mg.carry_unsearched({"items": [it]}, {}, [it], "d"), ([it], 0, 0))
         self.assertEqual(mg.apply_global({"items": [it]}, {"1": {"verdict": "no_match", "uri": None}}), 0)
 
     def test_approve_elsewhere_does_not_touch_a_match(self):
@@ -488,11 +490,12 @@ class PlanMergeFuzz(unittest.TestCase):
 class GlobalIdentityGuard(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.orig = mg.GLOBAL_APPROVALS
+        self.orig = (mg.GLOBAL_APPROVALS, mg.WORK_ROOT)  # WORK_ROOT too: carry-over reads other work dirs
         mg.GLOBAL_APPROVALS = Path(self.tmp.name) / "approvals.json"
+        mg.WORK_ROOT = Path(self.tmp.name)
 
     def tearDown(self):
-        mg.GLOBAL_APPROVALS = self.orig
+        mg.GLOBAL_APPROVALS, mg.WORK_ROOT = self.orig
         self.tmp.cleanup()
 
     def test_metadata_less_files_get_no_standing_decision(self):
@@ -594,3 +597,126 @@ class RetryAfter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CarryKnownMatches(unittest.TestCase):
+    """Exact matches found in one playlist are reused in others without a search."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE)
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = root, root / "approvals.json", "T"
+        self.root = root
+
+    def tearDown(self):
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = self.saved
+        self.tmp.cleanup()
+
+    def _playlist(self, slug, name, items, cache):
+        wd = self.root / slug
+        wd.mkdir()
+        (wd / "source.json").write_text(json.dumps({"name": name, "id": slug, "items": items}))
+        (wd / "matches.json").write_text(json.dumps(cache))
+        return wd
+
+    @staticmethod
+    def _match(it, uri, **extra):
+        m = {"verdict": "match", "score": 10, "uri": uri, "title": it["title"], "artist": it["artist"],
+             "album": "A", "duration_ms": it["duration_ms"], "dur_diff_ms": 0, "batch": "d", "key": mg.song_key(it)}
+        m.update(extra)
+        return m
+
+    def test_known_matches_collects_only_clean_exact_matches(self):
+        items = [local(0, "Good", "g", 200), local(1, "Kept", "k", 200), local(2, "Recheck", "r", 200),
+                 local(3, "Flagged", "f", 200), local(4, "NoUri", "n", 200), local(5, "Moved", "m", 200),
+                 local(6, "", "", 200), local(7, "Copy", "c", 200), local(8, "Legacy", "l", 200)]
+        self._playlist("p", "P", items, {
+            "0": self._match(items[0], "spotify:track:good"),
+            "1": self._match(items[1], "spotify:track:kept", keep_local=True),
+            "2": self._match(items[2], "spotify:track:re", recheck=True),
+            "3": {**self._match(items[3], "spotify:track:fl"), "verdict": "title_variant"},
+            "4": self._match(items[4], None),
+            "5": {**self._match(items[5], "spotify:track:mv"), "key": "other|song|1"},
+            "6": self._match(items[6], "spotify:track:anon"),
+            "7": self._match(items[7], "spotify:track:copy", carried_from="Elsewhere"),  # a copy, not a search result
+            "8": {k: v for k, v in self._match(items[8], "spotify:track:old").items() if k != "key"},  # pre-key entry
+        })
+        known = mg.known_matches()
+        self.assertEqual(set(known), {mg.song_key(items[0])})
+        self.assertEqual(known[mg.song_key(items[0])]["uri"], "spotify:track:good")
+        self.assertEqual(known[mg.song_key(items[0])]["from_playlist"], "P")
+
+    def test_known_matches_tolerates_missing_or_broken_files(self):
+        (self.root / "empty").mkdir()
+        (self.root / "broken").mkdir()
+        (self.root / "broken" / "source.json").write_text("{not json")
+        (self.root / "broken" / "matches.json").write_text("{}")
+        (self.root / "current").write_text("x")  # the marker file, not a work dir
+        self.assertEqual(mg.known_matches(), {})
+
+    def test_carry_unsearched_reuses_known_match_but_decision_wins(self):
+        a, b, c, d = local(0, "A", "a", 100), local(1, "B", "b", 100), local(2, "C", "c", 100), local(3, "D", "d", 100)
+        self._playlist("p", "P", [a, b, c], {
+            "0": self._match(a, "spotify:track:A"),
+            "1": self._match(b, "spotify:track:B"),
+            "2": self._match(c, "spotify:track:C"),
+        })
+        mg.GLOBAL_APPROVALS.write_text(json.dumps({
+            mg.song_key(b): {"decision": "keep_local", "uri": None, "from_playlist": "P"},
+        }))
+        cache = {}
+        rest, decided, matched = mg.carry_unsearched({"name": "T", "items": [a, b, d]}, cache, [a, b, d], "today")
+        self.assertEqual([it["pos"] for it in rest], [3])
+        self.assertEqual((decided, matched), (1, 1))
+        self.assertEqual(cache["0"]["verdict"], "match")
+        self.assertEqual(cache["0"]["uri"], "spotify:track:A")
+        self.assertEqual(cache["0"]["carried_from"], "P")
+        self.assertEqual(cache["0"]["key"], mg.song_key(a))
+        self.assertEqual(cache["0"]["batch"], "today")
+        self.assertTrue(mg.wanted(cache["0"]))
+        self.assertTrue(cache["1"]["keep_local"])  # the standing decision, not the exact match
+        self.assertEqual(cache["1"]["verdict"], "carried")
+        self.assertNotIn("3", cache)
+
+    def test_carry_unsearched_ignores_files_without_identity(self):
+        anon = local(0, "", "", 100)
+        self._playlist("p", "P", [anon], {"0": self._match(anon, "spotify:track:anon")})
+        cache = {}
+        rest, decided, matched = mg.carry_unsearched({"name": "T", "items": [anon]}, cache, [anon], "today")
+        self.assertEqual(len(rest), 1)
+        self.assertEqual((decided, matched), (0, 0))
+
+    def test_cmd_match_searches_each_distinct_song_once(self):
+        import argparse
+        import contextlib
+        import io
+        hit = local(0, "Known", "k", 100)
+        self._playlist("p", "P", [hit], {"0": self._match(hit, "spotify:track:known")})
+        dup1, dup2 = local(1, "Twice", "t", 150), local(3, "Twice", "t", 150)
+        other = local(2, "Other", "o", 120)
+        self._playlist("t", "T", [local(0, "Known", "k", 100), dup1, other, dup2], {})
+        calls = []
+
+        def fake_search(it):
+            calls.append(it["pos"])
+            return [cand(it["title"], [it["artist"]], it["duration_ms"], uri=f"spotify:track:{it['pos']}")]
+
+        orig = mg.search_candidates
+        mg.search_candidates = fake_search
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                mg.cmd_match(argparse.Namespace(limit=None))
+        finally:
+            mg.search_candidates = orig
+        self.assertEqual(calls, [1, 2])
+        cache = json.loads((self.root / "t" / "matches.json").read_text())
+        self.assertEqual(len(cache), 4)  # the trailing duplicate was saved too
+        self.assertEqual(cache["0"]["uri"], "spotify:track:known")
+        self.assertEqual(cache["0"]["carried_from"], "P")
+        self.assertEqual(cache["3"]["uri"], "spotify:track:1")
+        self.assertEqual(cache["3"]["carried_from"], "T")
+        self.assertEqual({k: v["verdict"] for k, v in cache.items()}, {k: "match" for k in "0123"})
+        summary = json.loads((self.root / "t" / "summary.json").read_text())
+        self.assertEqual(summary["searched"], 4)
+        self.assertEqual(summary["in_playlist_after_build"], 4)

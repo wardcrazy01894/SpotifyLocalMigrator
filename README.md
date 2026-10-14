@@ -37,7 +37,7 @@ Rebuild the playlist out of real Spotify tracks, **but only where the match is e
 | 🎯 **Strict matching** | Same title, same artist, same length. Case, punctuation, accents and leading track numbers are ignored. |
 | 🚩 **Every mismatch flagged with a reason** | `duration_mismatch`, `title_variant`, `artist_mismatch`, `no_match`, each with the closest Spotify track shown next to it. |
 | ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". `build` brings the playlist up to date in place, original order preserved; local files you have pasted or dragged in are kept and moved to their place in the order, never removed. |
-| 🔁 **Decisions carry everywhere** | Approve *Three Little Birds* once and it's approved in every other playlist that has it. |
+| 🔁 **Decisions and matches carry everywhere** | Approve *Three Little Birds* once and it's approved in every other playlist that has it. A song that matched exactly in one playlist (or earlier in the same one) is reused in the next without spending a search. |
 | 📅 **Built for the daily grind** | Spotify caps searches per day. `match --limit 400` does a batch and stops; progress is saved every 10 songs. |
 | 🧾 **Completeness check** | `verify` proves every source song is in the new playlist (as a Spotify track or a dragged-in local file) or is a collapsed duplicate, lists anything undecided, and calls out non-track items (podcast episodes) it cannot carry over. |
 | 🪶 **Zero dependencies** | One Python file, standard library only. |
@@ -128,7 +128,7 @@ python3 migrate.py -w iPhone build                # playlist grows a bit
 # review work/iphone/flagged_<today>.csv, approve, build, verify… see you tomorrow
 ```
 
-`-w <name>` selects which exported playlist you're working on, so several can be in flight.
+`-w <name>` selects which exported playlist you're working on, so several can be in flight. Songs already decided or matched exactly in another playlist are not searched again; `match --limit 0` shows how many of a freshly exported playlist still need a search.
 
 ## ✋ Two things only a human can do
 
