@@ -498,28 +498,28 @@ def cmd_match(args) -> None:
             key = song_key(it)
             if has_identity(it) and key in found:
                 cache[str(it["pos"])] = carried_match(found[key], src["name"], batch, key)
-                continue
-            try:
-                cands = search_candidates(it)
-                failures = 0
-            except RateLimited as e:
-                stopped = str(e)
-                break
-            except RuntimeError as e:
-                failures += 1
-                print(f"\n  search failed for #{it['pos']} {it['title']}: {e}", file=sys.stderr)
-                if failures >= 5:
-                    stopped = f"{failures} consecutive search failures; last: {e}"
+            else:
+                try:
+                    cands = search_candidates(it)
+                    failures = 0
+                except RateLimited as e:
+                    stopped = str(e)
                     break
-                continue
-            _store_best(cache, it, cands, batch)
-            if cache[str(it["pos"])]["verdict"] == "match":
-                found.setdefault(key, cache[str(it["pos"])])
+                except RuntimeError as e:
+                    failures += 1
+                    print(f"\n  search failed for #{it['pos']} {it['title']}: {e}", file=sys.stderr)
+                    if failures >= 5:
+                        stopped = f"{failures} consecutive search failures; last: {e}"
+                        break
+                    continue
+                _store_best(cache, it, cands, batch)
+                if cache[str(it["pos"])]["verdict"] == "match":
+                    found.setdefault(key, cache[str(it["pos"])])
+                time.sleep(0.05)
             if n % 10 == 0 or n == len(todo):
                 cache_path.write_text(json.dumps(cache, indent=1))
                 rate = n / max(time.time() - t0, 1e-6)
                 print(f"  {n}/{len(todo)}  ({rate:.1f}/s)", end="\r", flush=True)
-            time.sleep(0.05)
     finally:
         cache_path.write_text(json.dumps(cache, indent=1))  # never lose paid-for searches
     print()
@@ -680,10 +680,11 @@ def known_matches() -> dict[str, dict]:
             m = cache.get(str(it["pos"]))
             if not m or m.get("verdict") != "match" or not m.get("uri") or m.get("keep_local") or m.get("recheck"):
                 continue
-            key = song_key(it)
-            if m.get("key", key) != key:
-                continue
-            out.setdefault(key, {**m, "from_playlist": src.get("name", d.name)})
+            if m.get("carried_from"):
+                continue  # only real search results seed reuse; a copy may be stale after a recheck/research elsewhere
+            if m.get("key") != song_key(it):
+                continue  # unkeyed legacy entry, or a re-exported playlist whose positions shifted
+            out.setdefault(m["key"], {**m, "from_playlist": src.get("name", d.name)})
     return out
 
 

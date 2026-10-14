@@ -630,7 +630,7 @@ class CarryKnownMatches(unittest.TestCase):
     def test_known_matches_collects_only_clean_exact_matches(self):
         items = [local(0, "Good", "g", 200), local(1, "Kept", "k", 200), local(2, "Recheck", "r", 200),
                  local(3, "Flagged", "f", 200), local(4, "NoUri", "n", 200), local(5, "Moved", "m", 200),
-                 local(6, "", "", 200)]
+                 local(6, "", "", 200), local(7, "Copy", "c", 200), local(8, "Legacy", "l", 200)]
         self._playlist("p", "P", items, {
             "0": self._match(items[0], "spotify:track:good"),
             "1": self._match(items[1], "spotify:track:kept", keep_local=True),
@@ -639,6 +639,8 @@ class CarryKnownMatches(unittest.TestCase):
             "4": self._match(items[4], None),
             "5": {**self._match(items[5], "spotify:track:mv"), "key": "other|song|1"},
             "6": self._match(items[6], "spotify:track:anon"),
+            "7": self._match(items[7], "spotify:track:copy", carried_from="Elsewhere"),  # a copy, not a search result
+            "8": {k: v for k, v in self._match(items[8], "spotify:track:old").items() if k != "key"},  # pre-key entry
         })
         known = mg.known_matches()
         self.assertEqual(set(known), {mg.song_key(items[0])})
@@ -709,6 +711,7 @@ class CarryKnownMatches(unittest.TestCase):
             mg.search_candidates = orig
         self.assertEqual(calls, [1, 2])
         cache = json.loads((self.root / "t" / "matches.json").read_text())
+        self.assertEqual(len(cache), 4)  # the trailing duplicate was saved too
         self.assertEqual(cache["0"]["uri"], "spotify:track:known")
         self.assertEqual(cache["0"]["carried_from"], "P")
         self.assertEqual(cache["3"]["uri"], "spotify:track:1")
