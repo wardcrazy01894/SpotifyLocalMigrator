@@ -477,10 +477,11 @@ def cmd_match(args) -> None:
     items = src["items"]
     batch = datetime.date.today().isoformat()
     todo = [i for i in items if i["is_local"] and str(i["pos"]) not in cache]
-    before = len(todo)
-    todo = carry_unsearched(src, cache, todo, batch)  # decided elsewhere: no search needed
-    if before - len(todo):
-        print(f"  {before - len(todo)} song(s) decided in another playlist; not searching them")
+    todo, decided, matched = carry_unsearched(src, cache, todo, batch)  # known already: no search needed
+    if decided:
+        print(f"  {decided} song(s) decided in another playlist; not searching them")
+    if matched:
+        print(f"  {matched} song(s) matched exactly in another playlist; reusing those tracks")
     remaining = len(todo)
     limit = getattr(args, "limit", None)
     if limit is not None:
@@ -491,8 +492,13 @@ def cmd_match(args) -> None:
     t0 = time.time()
     stopped: str | None = None
     failures = 0
+    found: dict[str, dict] = {}  # exact matches made in this run, for duplicates later in the list
     try:
         for n, it in enumerate(todo, 1):
+            key = song_key(it)
+            if has_identity(it) and key in found:
+                cache[str(it["pos"])] = carried_match(found[key], src["name"], batch, key)
+                continue
             try:
                 cands = search_candidates(it)
                 failures = 0
@@ -507,6 +513,8 @@ def cmd_match(args) -> None:
                     break
                 continue
             _store_best(cache, it, cands, batch)
+            if cache[str(it["pos"])]["verdict"] == "match":
+                found.setdefault(key, cache[str(it["pos"])])
             if n % 10 == 0 or n == len(todo):
                 cache_path.write_text(json.dumps(cache, indent=1))
                 rate = n / max(time.time() - t0, 1e-6)
@@ -645,17 +653,68 @@ def record_global(it: dict, m: dict, decision: str, playlist: str) -> None:
     GLOBAL_APPROVALS.write_text(json.dumps(g, indent=1))
 
 
-def carry_unsearched(src: dict, cache: dict, todo: list[dict], batch: str) -> list[dict]:
-    """Songs already decided in another playlist do not need a search (and must not spend
-    the daily search budget). Give them a cache entry from the standing decision and drop
-    them from the to-do list."""
-    g = load_global()
-    rest: list[dict] = []
-    for it in todo:
-        d = g.get(song_key(it)) if has_identity(it) else None
-        if not d:
-            rest.append(it)
+CARRY_FIELDS = ("verdict", "score", "uri", "title", "artist", "album", "duration_ms", "dur_diff_ms")
+
+
+def known_matches() -> dict[str, dict]:
+    """Exact matches already found while working on any playlist, keyed by song_key.
+
+    An exact match depends only on the song's title, artist and length, so the same file in
+    another playlist needs no search. Read from every work dir's source.json + matches.json,
+    nothing extra to maintain. Entries the owner has since overridden (keep-local, recheck)
+    or that belong to a different song than their position now holds are skipped."""
+    out: dict[str, dict] = {}
+    if not WORK_ROOT.is_dir():
+        return out
+    for d in sorted(WORK_ROOT.iterdir()):
+        sp, mp = d / "source.json", d / "matches.json"
+        if not (sp.is_file() and mp.is_file()):
             continue
+        try:
+            src, cache = json.loads(sp.read_text()), json.loads(mp.read_text())
+        except (OSError, ValueError):
+            continue
+        for it in src.get("items", []):
+            if not it.get("is_local") or not has_identity(it):
+                continue
+            m = cache.get(str(it["pos"]))
+            if not m or m.get("verdict") != "match" or not m.get("uri") or m.get("keep_local") or m.get("recheck"):
+                continue
+            key = song_key(it)
+            if m.get("key", key) != key:
+                continue
+            out.setdefault(key, {**m, "from_playlist": src.get("name", d.name)})
+    return out
+
+
+def carried_match(known: dict, from_playlist: str, batch: str, key: str) -> dict:
+    """A cache entry for a song whose exact match was found elsewhere (or earlier in this run)."""
+    m = {f: known.get(f) for f in CARRY_FIELDS}
+    m.update({"verdict": "match", "batch": batch, "key": key, "carried_from": from_playlist})
+    return m
+
+
+def carry_unsearched(src: dict, cache: dict, todo: list[dict], batch: str) -> tuple[list[dict], int, int]:
+    """Songs already decided in another playlist, or matched exactly in any playlist, do not
+    need a search (and must not spend the daily search budget). Give them a cache entry and
+    drop them from the to-do list. Returns (still to search, decisions carried, matches carried).
+    A standing decision wins over an exact match found elsewhere."""
+    g = load_global()
+    known = known_matches()
+    rest: list[dict] = []
+    decided = matched = 0
+    for it in todo:
+        key = song_key(it) if has_identity(it) else None
+        d = g.get(key) if key else None
+        if not d:
+            km = known.get(key) if key else None
+            if km:
+                cache[str(it["pos"])] = carried_match(km, km["from_playlist"], batch, key)
+                matched += 1
+            else:
+                rest.append(it)
+            continue
+        decided += 1
         m = {
             "verdict": "carried",
             "score": 0,
@@ -674,7 +733,7 @@ def carry_unsearched(src: dict, cache: dict, todo: list[dict], batch: str) -> li
         else:
             m["approved"] = True
         cache[str(it["pos"])] = m
-    return rest
+    return rest, decided, matched
 
 
 def forget_global(it: dict) -> None:
