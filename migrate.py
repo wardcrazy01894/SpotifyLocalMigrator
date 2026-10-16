@@ -874,8 +874,8 @@ def cmd_approve(args) -> None:
             forget_global(it)
             changed += 1
             print(f"  recheck #{it['pos']}: {it['title']} — {it['artist']}  (open; use research or approve --pos)")
-            twins = [o["pos"] for o in src["items"] if o["pos"] != it["pos"] and o["is_local"] and song_key(o) == song_key(it)
-                     and wanted(cache.get(str(o["pos"])))]
+            twins = [o["pos"] for o in src["items"] if has_identity(it) and o["pos"] != it["pos"] and o["pos"] not in recheck
+                     and o["is_local"] and song_key(o) == song_key(it) and wanted(cache.get(str(o["pos"])))]
             if twins:
                 print(f"    NOTE: the same song is also at #{','.join(map(str, twins))} with the same track; recheck those too if it is wrong",
                       file=sys.stderr)
@@ -968,7 +968,7 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
     extra_tracks = sorted(live_set - set(expected))
     non_track = [it for it in src["items"] if not it["is_local"] and not (it["uri"] or "").startswith("spotify:track:")]
     missing_local = [it for it in keep_local if it["uri"] not in live_local]
-    extra_local = sorted(live_local - {it["uri"] for it in keep_local})  # pasted in, but the song is built as a Spotify track
+    extra_local = sorted(live_local - {it["uri"] for it in keep_local})  # pasted in without a keep-local decision
     return {
         "source_total": len(src["items"]),
         "searched": sum(1 for it in src["items"] if str(it["pos"]) in cache),
@@ -1018,7 +1018,7 @@ def cmd_verify(args) -> None:
     if len(v["missing_local"]) > 20:
         print(f"    ... and {len(v['missing_local']) - 20} more")
     if v["extra_local"]:
-        print(f"  Local files in the playlist without a keep-local decision ({len(v['extra_local'])}); remove them by hand, or mark the song keep-local:")
+        print(f"  Local files in the playlist without a keep-local decision ({len(v['extra_local'])}); remove them by hand, or mark the song keep-local and remove its Spotify track by hand:")
         for u in v["extra_local"][:20]:
             print(f"    - {u}")
     if v["missing_local"]:
@@ -1037,7 +1037,14 @@ def cmd_verify(args) -> None:
     elif not unresolved and ok and not v["extra_local"]:
         print(f"All decided; drag the {len(v['missing_local'])} remaining local file(s) in to finish.")
     elif not unresolved and ok:
-        print(f"All decided; remove the {len(v['extra_local'])} extra local file(s) above by hand to finish (`build` never removes local files).")
+        todo = f"remove the {len(v['extra_local'])} extra local file(s) above by hand"
+        if v["missing_local"]:
+            todo += f" and paste the {len(v['missing_local'])} missing one(s) in"
+        print(f"All decided; {todo} to finish (`build` never removes local files).")
+    elif not unresolved and v["extra_tracks"] and v["live_local"]:
+        # merge mode (local files present) never removes tracks, so `build` alone cannot fix this
+        print(f"All decided; remove the {len(v['extra_tracks'])} unwanted Spotify track(s) above by hand"
+              f"{', then run `build`' if v['missing_tracks'] or v['missing_local'] else ''}.")
     elif not unresolved:
         print("All decided, but the playlist does not match the decisions; run `build`.")
 
