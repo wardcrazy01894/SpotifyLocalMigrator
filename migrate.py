@@ -1089,7 +1089,7 @@ def cmd_verify(args) -> None:
         if v["extra_local"]:
             todo += f" and the {len(v['extra_local'])} extra local file(s)"
         if v["missing_local"]:
-            todo += f", paste the {len(v['missing_local'])} missing local file(s) in"
+            todo += f"; paste the {len(v['missing_local'])} missing local file(s) in"
         if v["missing_tracks"]:
             todo += ", then run `build`"
         print(f"All decided; {todo}.")
