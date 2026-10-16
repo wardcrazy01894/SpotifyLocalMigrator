@@ -661,7 +661,7 @@ class ApproveCommand(unittest.TestCase):
         self.assertNotIn("keep_local", c["0"])
         self.assertNotIn(mg.song_key(self.src["items"][0]), mg.load_global())
 
-    def test_unkeep_on_carried_entry_drops_it_for_resarch(self):
+    def test_unkeep_on_carried_entry_drops_it_for_research(self):
         with self.quiet:
             mg.cmd_approve(self._args(unkeep="1"))
         self.assertNotIn("1", self._cache())
