@@ -513,16 +513,22 @@ class CallRetries(unittest.TestCase):
         def fake_urlopen(req, data=None, timeout=None):
             calls.append(req.get_method())
             o = outcomes.pop(0)
+            if isinstance(o, tuple):  # (429, retry-after seconds)
+                raise urllib.error.HTTPError(req.full_url, 429, "", {"Retry-After": str(o[1])}, self._Resp(b""))
             if o == 429:
                 raise urllib.error.HTTPError(req.full_url, 429, "", {"Retry-After": "0"}, self._Resp(b""))
             if isinstance(o, int) and o != 200:
                 raise urllib.error.HTTPError(req.full_url, o, "", {}, self._Resp(b"boom"))
+            if isinstance(o, bytes):
+                return self._Resp(o)
             return self._Resp(b'{"ok": true}')
 
         orig_open, orig_tok, orig_sleep = mg.urllib.request.urlopen, mg.access_token, mg.time.sleep
         mg.urllib.request.urlopen, mg.access_token, mg.time.sleep = fake_urlopen, lambda: "t", lambda s: None
+        self.err = io.StringIO()
         try:
-            return mg._call(method, "/x", body={} if method != "GET" else None), calls
+            with contextlib.redirect_stderr(self.err):
+                return mg._call(method, "/x", body={} if method != "GET" else None), calls
         finally:
             mg.urllib.request.urlopen, mg.access_token, mg.time.sleep = orig_open, orig_tok, orig_sleep
 
@@ -532,9 +538,41 @@ class CallRetries(unittest.TestCase):
         self.assertEqual(calls, ["POST", "POST"])
 
     def test_post_does_not_retry_5xx(self):
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(mg.ApiError) as cm:
             self._run("POST", [502, 200])
-        self.assertIn("502", str(cm.exception))
+        self.assertIsInstance(cm.exception, RuntimeError)  # cmd_match / cmd_build still catch it
+        self.assertIn("POST https://api.spotify.com/v1/x -> 502: boom", str(cm.exception))
+
+    def test_429_message_names_the_call(self):
+        self._run("GET", [429, 200])
+        self.assertIn("GET https://api.spotify.com/v1/x -> 429; sleeping", self.err.getvalue())
+
+    def test_total_429_wait_is_capped(self):
+        with self.assertRaises(mg.RateLimited) as cm:
+            self._run("GET", [(429, 100)] * 7 + [200])
+        self.assertIn("GET https://api.spotify.com/v1/x still throttled after 505s", str(cm.exception))
+        self.assertIn("retry after 2 min", str(cm.exception))
+
+    def test_long_retry_after_names_the_call(self):
+        with self.assertRaises(mg.RateLimited) as cm:
+            self._run("POST", [(429, 86400)])
+        self.assertEqual(str(cm.exception), "Spotify rate limit (POST https://api.spotify.com/v1/x); retry after 24.1 h")  # 86400 + 1 s, rounded up
+
+    def test_rate_limited_wait_wording(self):
+        self.assertIn("retry after 0s", str(mg.RateLimited(0)))
+        self.assertIn("retry after 59s", str(mg.RateLimited(59)))
+        self.assertIn("retry after 1 min", str(mg.RateLimited(60)))
+        self.assertIn("retry after 3 min", str(mg.RateLimited(150)))  # rounded up, never under-promised
+        self.assertIn("retry after 60 min", str(mg.RateLimited(3599)))
+        self.assertIn("retry after 1.0 h", str(mg.RateLimited(3600)))
+        self.assertIn("retry after 1.1 h", str(mg.RateLimited(3659)))
+        self.assertIn("retry after 24.0 h", str(mg.RateLimited(86400)))
+
+    def test_non_json_body_is_an_api_error_naming_the_call(self):
+        with self.assertRaises(mg.ApiError) as cm:
+            self._run("GET", [b"<html>captive portal</html>"])
+        self.assertIn("GET https://api.spotify.com/v1/x -> 2xx but the body is not JSON", str(cm.exception))
+        self.assertIn("captive portal", str(cm.exception))
 
     def test_get_retries_5xx(self):
         res, calls = self._run("GET", [503, 200])
@@ -809,13 +847,39 @@ class CarryKnownMatches(unittest.TestCase):
         self.assertEqual(known[mg.song_key(items[0])]["uri"], "spotify:track:good")
         self.assertEqual(known[mg.song_key(items[0])]["from_playlist"], "P")
 
-    def test_known_matches_tolerates_missing_or_broken_files(self):
+    def test_known_matches_tolerates_missing_or_broken_files_but_says_so(self):
         (self.root / "empty").mkdir()
         (self.root / "broken").mkdir()
         (self.root / "broken" / "source.json").write_text("{not json")
         (self.root / "broken" / "matches.json").write_text("{}")
         (self.root / "current").write_text("x")  # the marker file, not a work dir
-        self.assertEqual(mg.known_matches(), {})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(mg.known_matches(), {})
+        self.assertIn("WARNING: skipping broken for match reuse", err.getvalue())
+        self.assertNotIn("empty", err.getvalue())  # nothing to read there, nothing to warn about
+
+    def test_cmd_match_stops_after_five_consecutive_failures_and_keeps_the_cache(self):
+        items = [local(i, f"S{i}", "s", 100) for i in range(7)]
+        self._playlist("t", "T", items, {})
+        orig = mg.search_candidates
+
+        def failing(it):
+            if it["pos"] == 0:
+                return [cand(it["title"], [it["artist"]], it["duration_ms"], uri="spotify:track:0")]
+            raise mg.ApiError(f"GET /search -> 500: down ({it['pos']})")
+
+        mg.search_candidates = failing
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                mg.cmd_match(argparse.Namespace(limit=None))
+        finally:
+            mg.search_candidates = orig
+        self.assertIn("search failed for #1 S1: GET /search -> 500: down (1)", err.getvalue())
+        self.assertIn("STOPPED EARLY: 5 consecutive search failures; last: GET /search -> 500: down (5)", err.getvalue())
+        cache = json.loads((self.root / "t" / "matches.json").read_text())
+        self.assertEqual(list(cache), ["0"])  # the one paid-for result survived
 
     def test_carry_unsearched_reuses_known_match_but_decision_wins(self):
         a, b, c, d = local(0, "A", "a", 100), local(1, "B", "b", 100), local(2, "C", "c", 100), local(3, "D", "d", 100)
@@ -1069,3 +1133,47 @@ class BuildCommand(unittest.TestCase):
         self.live = ["spotify:track:L0", items[0]["uri"]]
         _, err = self._build(keep_duplicates=True, dry_run=True)
         self.assertIn("--keep-duplicates is ignored", err)
+
+
+class LoadJson(unittest.TestCase):
+    def test_corrupt_file_exits_naming_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "matches.json"
+            p.write_text("{nope")
+            with self.assertRaises(SystemExit) as cm:
+                mg._load_json(p)
+            self.assertIn(str(p), str(cm.exception))
+            self.assertIn("Expecting property name", str(cm.exception))
+
+    def test_missing_file_uses_the_factory_or_exits(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "none.json"
+            self.assertEqual(mg._load_json(p, missing=dict), {})
+            self.assertEqual(mg._load_json(p, missing=list), [])
+            with self.assertRaises(SystemExit) as cm:
+                mg._load_json(p)
+            self.assertIn(str(p), str(cm.exception))
+
+
+class MainErrors(unittest.TestCase):
+    def _main(self, argv, fn):
+        saved_argv, saved_fn = sys.argv, mg.cmd_verify
+        sys.argv, mg.cmd_verify = ["migrate.py", *argv], fn
+        try:
+            with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(io.StringIO()):
+                mg.main()
+        finally:
+            sys.argv, mg.cmd_verify = saved_argv, saved_fn
+        return str(cm.exception)
+
+    def test_api_error_ends_with_the_reason_and_the_rerun_hint(self):
+        def boom(args):
+            raise mg.ApiError("PUT https://api.spotify.com/v1/playlists/P/items -> 400: bad position")
+        msg = self._main(["verify"], boom)
+        self.assertIn("PUT https://api.spotify.com/v1/playlists/P/items -> 400: bad position", msg)
+        self.assertIn("rerun the same command", msg)
+
+    def test_rate_limit_ends_with_the_wait(self):
+        def throttled(args):
+            raise mg.RateLimited(7200)
+        self.assertIn("retry after 2.0 h. Progress so far is saved", self._main(["verify"], throttled))
