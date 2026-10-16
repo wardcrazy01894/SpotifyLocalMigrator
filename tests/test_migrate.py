@@ -641,6 +641,28 @@ class ApproveCommand(unittest.TestCase):
         self.assertEqual(summary["counts"].get("recheck"), 1)
         self.assertEqual(summary["in_playlist_after_build"], 0)
 
+    def test_recheck_warns_about_a_twin_still_wanted_and_blocks_global_reapply(self):
+        twin = local(3, "C", "c", 100)
+        self.src["items"].append(twin)
+        (self.wd / "source.json").write_text(json.dumps(self.src))
+        c = self._cache()
+        c["3"] = {"verdict": "duration_mismatch", "uri": "spotify:track:C", "title": "C", "artist": "c", "key": mg.song_key(twin)}
+        (self.wd / "matches.json").write_text(json.dumps(c))
+        with self.quiet:
+            mg.cmd_approve(self._args(reasons="duration_mismatch"))  # approves #2 and #3, records the standing rule
+        err = io.StringIO()
+        with self.quiet, contextlib.redirect_stderr(err):
+            mg.cmd_approve(self._args(recheck="2"))
+        self.assertIn("also at #3", err.getvalue())
+        c = self._cache()
+        self.assertTrue(c["2"]["recheck"])
+        self.assertNotIn("approved", c["2"])
+        self.assertTrue(c["3"]["approved"])  # the twin is untouched; the note tells the owner
+        # a standing rule recorded later for the same song must not quietly re-approve the open entry
+        mg.record_global(twin, c["3"], "approve", "T")
+        self.assertEqual(mg.apply_global(self.src, c), 0)
+        self.assertNotIn("approved", c["2"])
+
     def test_recheck_on_keep_local_is_refused(self):
         err = io.StringIO()
         with self.quiet, contextlib.redirect_stderr(err):
