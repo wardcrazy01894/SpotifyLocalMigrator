@@ -96,7 +96,7 @@ Open `work/<playlist>/flagged.csv`. Each row has your file, the closest Spotify 
 python3 migrate.py approve --reasons title_variant          # "(feat. X)" vs "feat. X"? fine, take them all
 python3 migrate.py approve --pos 37,134                      # these two specifically
 python3 migrate.py approve --keep-local 141                  # never add this one, I like my version
-python3 migrate.py approve --recheck 211,223                 # the search landed on the wrong track, look again later
+python3 migrate.py approve --recheck 211,223                 # wrong track: reopen (not built, standing decision forgotten) until research/approve --pos
 python3 migrate.py research --pos 211 --query "I See Fire Kygo remix"   # …like this; stores it if exact
 python3 migrate.py research --pos 211 --query "…" --take    # or take the top result anyway
 python3 migrate.py research --pos 223 --pick spotify:track:…  # or name the track yourself
@@ -133,7 +133,7 @@ python3 migrate.py -w iPhone build                # playlist grows a bit
 ## ✋ Two things only a human can do
 
 - **Folders.** The Web API has no concept of playlist folders. Make the folder in the desktop app and drag the new playlist in.
-- **Local files.** Paste their URIs into the new playlist in the desktop app: `verify` writes the ones still missing to `work/<playlist>/paste_local.txt` (`spotify:local:…` URIs, one per line); copy its contents, open the new playlist, click an empty spot and press Cmd+V. All of them land in one paste, at the end; the next `build` moves them into place. Dragging them from the old playlist works too. `verify` counts them.
+- **Local files.** Paste their URIs into the new playlist in the desktop app: `verify` writes the ones still missing to `work/<playlist>/paste_local.txt` (`spotify:local:…` URIs, one per line); copy its contents, open the new playlist, click an empty spot and press Cmd+V. All of them land in one paste, at the end; the next `build` moves them into place. Dragging them from the old playlist works too. `verify` counts them, and flags any local file in the new playlist whose song has no keep-local decision (for example a file pasted in before its song was approved), since `build` never removes local files.
 
 ## 🔬 Matching details
 

@@ -789,8 +789,8 @@ def apply_global(src: dict, cache: dict) -> int:
     for it in src["items"]:
         m = cache.get(str(it["pos"]))
         d = g.get(song_key(it)) if has_identity(it) else None
-        if not m or not d or m.get("approved") is not None or m.get("keep_local"):
-            continue
+        if not m or not d or m.get("approved") is not None or m.get("keep_local") or m.get("recheck"):
+            continue  # a recheck stays open until research or an explicit approve resolves it
         if m["verdict"] == "match" and d["decision"] != "keep_local":
             continue
         if d["decision"] == "keep_local":
@@ -915,6 +915,11 @@ def cmd_approve(args) -> None:
             forget_global(it)
             changed += 1
             print(f"  recheck #{it['pos']}: {it['title']} — {it['artist']}  (open; use research or approve --pos)")
+            twins = [o["pos"] for o in src["items"] if o["pos"] != it["pos"] and o["is_local"] and song_key(o) == song_key(it)
+                     and wanted(cache.get(str(o["pos"])))]
+            if twins:
+                print(f"    NOTE: the same song is also at #{','.join(map(str, twins))} with the same track; recheck those too if it is wrong",
+                      file=sys.stderr)
         elif (m["verdict"] != "match" or m.get("recheck")) and (m["verdict"] in reasons or it["pos"] in positions):
             explicit = it["pos"] in positions
             if m.get("recheck") and not explicit:
@@ -1054,7 +1059,7 @@ def cmd_verify(args) -> None:
     if len(v["missing_local"]) > 20:
         print(f"    ... and {len(v['missing_local']) - 20} more")
     if v["extra_local"]:
-        print(f"  Local files in the playlist that are not keep-local ({len(v['extra_local'])}; the song is also there as a Spotify track, remove by hand):")
+        print(f"  Local files in the playlist without a keep-local decision ({len(v['extra_local'])}); remove them by hand, or mark the song keep-local:")
         for u in v["extra_local"][:20]:
             print(f"    - {u}")
     if v["missing_local"]:
@@ -1072,6 +1077,8 @@ def cmd_verify(args) -> None:
         print("COMPLETE: every source song is accounted for in the new playlist.")
     elif not unresolved and ok and not v["extra_local"]:
         print(f"All decided; drag the {len(v['missing_local'])} remaining local file(s) in to finish.")
+    elif not unresolved and ok:
+        print(f"All decided; remove the {len(v['extra_local'])} extra local file(s) above by hand to finish (`build` never removes local files).")
     elif not unresolved:
         print("All decided, but the playlist does not match the decisions; run `build`.")
 
