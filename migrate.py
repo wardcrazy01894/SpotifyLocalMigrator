@@ -462,7 +462,7 @@ def search_candidates(src: dict) -> list[dict]:
     seen: dict[str, dict] = {}
     for q in queries:
         res = api_get("/search", q=q, type="track", limit=10, market=MARKET)
-        for t in res.get("tracks", {}).get("items", []):
+        for t in filter(None, res.get("tracks", {}).get("items", [])):  # Spotify can return null items
             seen.setdefault(t["id"], t)
         if any(evaluate(src, t)["verdict"] == "match" for t in seen.values()):
             break
@@ -470,10 +470,8 @@ def search_candidates(src: dict) -> list[dict]:
 
 
 def cmd_match(args) -> None:
-    wd = current_work()
-    src = json.loads((wd / "source.json").read_text())
+    wd, src, cache = load_state()  # aligns the cache first: a re-export may have shifted positions
     cache_path = wd / "matches.json"
-    cache: dict[str, dict] = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     items = src["items"]
     batch = datetime.date.today().isoformat()
     todo = [i for i in items if i["is_local"] and str(i["pos"]) not in cache]
@@ -563,8 +561,9 @@ def write_reports(wd: Path, src: dict, cache: dict, batch: str | None = None) ->
             v = "keep_local"
         elif m.get("approved"):
             v = "approved_" + v
-        counts[v] = counts.get(v, 0) + 1
-        if v in ("match", "not_searched", "keep_local") or v.startswith("approved_"):
+        bucket = "recheck" if m.get("recheck") else v  # a recheck is open whatever the verdict was
+        counts[bucket] = counts.get(bucket, 0) + 1
+        if bucket in ("match", "not_searched", "keep_local") or bucket.startswith("approved_"):
             continue
         rows.append(
             {
@@ -619,8 +618,8 @@ GLOBAL_APPROVALS = WORK_ROOT / "approvals.json"
 
 
 def wanted(m: dict | None) -> bool:
-    """Should this local track's candidate go into the new playlist?"""
-    if not m or not m.get("uri") or m.get("keep_local"):
+    """Should this local track's candidate go into the new playlist? A recheck is open, not wanted."""
+    if not m or not m.get("uri") or m.get("keep_local") or m.get("recheck"):
         return False
     return m["verdict"] == "match" or m.get("approved") is True
 
@@ -749,8 +748,8 @@ def apply_global(src: dict, cache: dict) -> int:
     for it in src["items"]:
         m = cache.get(str(it["pos"]))
         d = g.get(song_key(it)) if has_identity(it) else None
-        if not m or not d or m.get("approved") is not None or m.get("keep_local"):
-            continue
+        if not m or not d or m.get("approved") is not None or m.get("keep_local") or m.get("recheck"):
+            continue  # a recheck stays open until research or an explicit approve resolves it
         if m["verdict"] == "match" and d["decision"] != "keep_local":
             continue
         if d["decision"] == "keep_local":
@@ -867,11 +866,25 @@ def cmd_approve(args) -> None:
             record_global(it, m, "keep_local", src["name"])
             changed += 1
         elif it["pos"] in recheck:
-            m["recheck"] = True
-            changed += 1
-        elif m["verdict"] != "match" and (m["verdict"] in reasons or it["pos"] in positions):
-            explicit = it["pos"] in positions
             if m.get("keep_local"):
+                print(f"  ignored #{it['pos']}: keep-local (use --unkeep first)", file=sys.stderr)
+                continue
+            m["recheck"] = True
+            m.pop("approved", None)  # open again: not built until research or an explicit approve resolves it
+            forget_global(it)
+            changed += 1
+            print(f"  recheck #{it['pos']}: {it['title']} — {it['artist']}  (open; use research or approve --pos)")
+            twins = [o["pos"] for o in src["items"] if has_identity(it) and o["pos"] != it["pos"] and o["pos"] not in recheck
+                     and o["is_local"] and song_key(o) == song_key(it) and wanted(cache.get(str(o["pos"])))
+                     and cache[str(o["pos"])].get("uri") == m.get("uri")]
+            if twins:
+                print(f"    NOTE: the same song is also at #{','.join(map(str, twins))} with the same track; recheck those too if it is wrong",
+                      file=sys.stderr)
+        elif (m["verdict"] != "match" or m.get("recheck")) and (m["verdict"] in reasons or it["pos"] in positions):
+            explicit = it["pos"] in positions
+            if m.get("recheck") and not explicit:
+                print(f"  skipped #{it['pos']}: marked recheck (name it with --pos to approve anyway)", file=sys.stderr)
+            elif m.get("keep_local"):
                 if explicit:
                     print(f"  ignored #{it['pos']}: already keep-local (use --unkeep to reverse)", file=sys.stderr)
             elif not m.get("uri"):
@@ -918,7 +931,7 @@ def cmd_research(args) -> None:
         print(f"  picked: {r['title']} — {r['artist']} {fmt_dur(r['duration_ms'])} ({r['verdict']})")
     else:
         res = api_get("/search", q=args.query, type="track", limit=10, market=MARKET)
-        cands = sorted((evaluate(it, t) for t in res.get("tracks", {}).get("items", [])), key=lambda r: -r["score"])
+        cands = sorted((evaluate(it, t) for t in filter(None, res.get("tracks", {}).get("items", []))), key=lambda r: -r["score"])
         for r in cands[:8]:
             print(f"  {r['verdict']:17} {r['score']:3}  {r['title']} — {r['artist']} [{r['album']}] {fmt_dur(r['duration_ms'])}  {r['uri']}")
         if cands and (args.take or cands[0]["verdict"] == "match"):
@@ -956,6 +969,7 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
     extra_tracks = sorted(live_set - set(expected))
     non_track = [it for it in src["items"] if not it["is_local"] and not (it["uri"] or "").startswith("spotify:track:")]
     missing_local = [it for it in keep_local if it["uri"] not in live_local]
+    extra_local = sorted(live_local - {it["uri"] for it in keep_local})  # pasted in without a keep-local decision
     return {
         "source_total": len(src["items"]),
         "searched": sum(1 for it in src["items"] if str(it["pos"]) in cache),
@@ -967,9 +981,10 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
         "extra_tracks": extra_tracks,
         "keep_local": keep_local,
         "missing_local": missing_local,
+        "extra_local": extra_local,
         "unresolved": unresolved,
         "non_track": non_track,  # podcast episodes etc.; the API will not add them to a playlist this way
-        "complete": not unresolved and not missing_tracks and not extra_tracks and not missing_local,
+        "complete": not unresolved and not missing_tracks and not extra_tracks and not missing_local and not extra_local,
     }
 
 
@@ -1003,6 +1018,10 @@ def cmd_verify(args) -> None:
         print(f"    - #{it['pos']} {it['title']} — {it['artist']}")
     if len(v["missing_local"]) > 20:
         print(f"    ... and {len(v['missing_local']) - 20} more")
+    if v["extra_local"]:
+        print(f"  Local files in the playlist without a keep-local decision ({len(v['extra_local'])}); remove them by hand, or mark the song keep-local and remove its Spotify track by hand:")
+        for u in v["extra_local"][:20]:
+            print(f"    - {u}")
     if v["missing_local"]:
         paste = wd / "paste_local.txt"
         paste.write_text("".join(it["uri"] + "\n" for it in v["missing_local"]))
@@ -1016,8 +1035,23 @@ def cmd_verify(args) -> None:
         print(f"    ... and {len(unresolved) - 40} more")
     if v["complete"]:
         print("COMPLETE: every source song is accounted for in the new playlist.")
-    elif not unresolved and ok:
+    elif not unresolved and ok and not v["extra_local"]:
         print(f"All decided; paste the {len(v['missing_local'])} remaining local file(s) in to finish (see paste_local.txt).")
+    elif not unresolved and ok:
+        todo = f"remove the {len(v['extra_local'])} extra local file(s) above by hand"
+        if v["missing_local"]:
+            todo += f" and paste the {len(v['missing_local'])} missing one(s) in"
+        print(f"All decided; {todo} to finish (`build` never removes local files).")
+    elif not unresolved and v["extra_tracks"] and v["live_local"]:
+        # merge mode (local files present) never removes tracks, so `build` alone cannot fix this
+        todo = f"remove the {len(v['extra_tracks'])} unwanted Spotify track(s) above by hand"
+        if v["extra_local"]:
+            todo += f" and the {len(v['extra_local'])} extra local file(s)"
+        if v["missing_local"]:
+            todo += f", paste the {len(v['missing_local'])} missing local file(s) in"
+        if v["missing_tracks"]:
+            todo += ", then run `build`"
+        print(f"All decided; {todo}.")
     elif not unresolved:
         print("All decided, but the playlist does not match the decisions; run `build`.")
 
@@ -1185,7 +1219,7 @@ def reorder_playlist(playlist_id: str, order: list[str], live: list[str]) -> int
     edited elsewhere mid-run makes Spotify reject the stale move instead of moving the wrong
     item. Returns the number of moves made. Do not edit the playlist while this runs."""
     moves = plan_reorder(order, live)
-    snapshot: str | None = None
+    snapshot: str | None = api_get(f"/playlists/{playlist_id}", fields="snapshot_id").get("snapshot_id") if moves else None
     for n, (start, before) in enumerate(moves, 1):
         body: dict = {"range_start": start, "insert_before": before, "range_length": 1}
         if snapshot:
@@ -1211,6 +1245,8 @@ def cmd_build(args) -> None:
         has_local = any(u.startswith("spotify:local:") for u in live)
         mode = "Merging into" if has_local else "Rewriting"
         print(f"{mode} '{pl['name']}' with {len(uris)} tracks ({dupes} duplicate(s) collapsed) ...")
+        if has_local and args.keep_duplicates:
+            print("  NOTE: --keep-duplicates is ignored when merging; the merge keeps one copy of each track.", file=sys.stderr)
         if args.dry_run:
             if has_local:
                 order = full_order(src, cache)
@@ -1220,6 +1256,8 @@ def cmd_build(args) -> None:
                     sim[pos:pos] = run
                 moves = plan_reorder(order, sim)
                 print(f"  dry run: would insert {sum(len(r) for _, r in plan)} track(s) in {len(plan)} call(s), then move {len(moves)} item(s)")
+            else:
+                print(f"  dry run: would replace the {len(live)} item(s) now in the playlist with {len(uris)} track(s)")
             return
         if has_local:
             # Local files have been pasted (or dragged) in by hand; a full replace would drop them
@@ -1296,7 +1334,7 @@ def main() -> None:
     ap.add_argument("--reasons", help="comma list: duration_mismatch,title_variant,artist_mismatch,no_match,no_duration")
     ap.add_argument("--pos", help="comma list of source positions (from flagged.csv)")
     ap.add_argument("--keep-local", help="comma list of positions to never add")
-    ap.add_argument("--recheck", help="comma list of positions to re-search by hand later (tracked, stays open)")
+    ap.add_argument("--recheck", help="comma list of positions to reopen for a re-search by hand (not built until resolved)")
     ap.add_argument("--unkeep", help="comma list of keep-local positions to reopen (also forgets the standing decision)")
     ap.set_defaults(fn=cmd_approve)
     rs = sub.add_parser("research", help="re-search one song with a custom query, or pick a specific track uri")
