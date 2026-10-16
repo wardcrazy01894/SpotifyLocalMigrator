@@ -39,7 +39,7 @@ Rebuild the playlist out of real Spotify tracks, **but only where the match is e
 | ✅ **Approve in bulk or one by one** | By reason, by position, or "keep this one local forever". `build` brings the playlist up to date in place, original order preserved; local files you have pasted or dragged in are kept and moved to their place in the order, never removed. |
 | 🔁 **Decisions and matches carry everywhere** | Approve *Three Little Birds* once and it's approved in every other playlist that has it. A song that matched exactly in one playlist (or earlier in the same one) is reused in the next without spending a search. |
 | 📅 **Built for the daily grind** | Spotify caps searches per day. `match --limit 400` does a batch and stops; progress is saved every 10 songs. |
-| 🧾 **Completeness check** | `verify` proves every source song is in the new playlist (as a Spotify track or a dragged-in local file) or is a collapsed duplicate, lists anything undecided, and calls out non-track items (podcast episodes) it cannot carry over. |
+| 🧾 **Completeness check** | `verify` proves every source song is in the new playlist (as a Spotify track or a pasted-in local file) or is a collapsed duplicate, lists anything undecided, and calls out non-track items (podcast episodes) it cannot carry over. |
 | 🪶 **Zero dependencies** | One Python file, standard library only. |
 
 ## 🚀 Setup (one time, ~3 minutes)
@@ -63,8 +63,10 @@ export SPOTIFY_CLIENT_ID=$(cat client_id.txt)
 python3 migrate.py find pry                         # which of my playlists match "pry"?
 python3 migrate.py export "name:Pry"                # pull the source playlist (local files included)
 python3 migrate.py match                            # search Spotify for every song
-python3 migrate.py build --name "Pry (Spotify version)"   # create it with exact matches only
+python3 migrate.py build                            # create "Pry (Spotify version)" with exact matches only
 ```
+
+Small playlist? `python3 migrate.py all "name:Pry"` does export, match and build in one go (`--limit N` caps how many songs are searched). `build --name` picks a different name for the new playlist.
 
 You'll get a breakdown like this:
 
@@ -103,6 +105,7 @@ python3 migrate.py research --pos 223 --pick spotify:track:…  # or name the tr
 python3 migrate.py approve --unkeep 141                      # changed my mind, reopen it
 python3 migrate.py build                                     # bring the playlist up to date, same URL
 python3 migrate.py verify                                    # are we done yet?
+python3 migrate.py report --batch 2026-10-07                 # re-print the breakdown; also rewrite that day's flagged_<date>.csv
 ```
 
 ```
@@ -110,7 +113,7 @@ Source 'Pry': 112 songs (112 searched so far)
 New playlist https://open.spotify.com/playlist/…: 107 Spotify tracks + 5 local files
   Decided so far: 107 Spotify + 5 local + 0 collapsed duplicate(s) = 112 of 112
   Spotify tracks expected from decisions: 107  OK
-  Local files to drag in by hand: 5  (present now: 5)
+  Local files to paste in by hand: 5  (present now: 5)
   Still missing: 0
   Unresolved (not yet decided or searched): 0
 COMPLETE: every source song is accounted for in the new playlist.
@@ -120,7 +123,7 @@ COMPLETE: every source song is accounted for in the new playlist.
 
 ### 📅 Big playlist? Do it in days
 
-For a personal (development-mode) app, Spotify's search endpoint allows roughly 400 to 480 songs per day (each song costs one to three searches), then answers 429 with a Retry-After of up to 24 hours. The window is a rolling 24 hours from the day's first search. `match` stops cleanly instead of sleeping and picks up where it left off; other commands that hit the limit exit with the same message.
+For a personal (development-mode) app, Spotify's search endpoint allows roughly 400 to 480 songs per day (each song costs one to three searches), then answers 429 with a Retry-After of up to 24 hours. The window is a rolling 24 hours from the day's first search. `match` stops cleanly instead of sleeping and picks up where it left off; other commands that hit the limit exit with a similar message.
 
 ```bash
 python3 migrate.py -w iPhone match --limit 400    # today's batch
@@ -168,6 +171,7 @@ Several endpoints were renamed and the old ones now return 403:
 | `work/approvals.json` | standing decisions, applied across all playlists |
 | `work/<playlist>/source.json` | exported source playlist |
 | `work/<playlist>/matches.json` | per-song verdict, closest candidate, approvals |
+| `work/<playlist>/matches.orphans.json` | entries dropped when a re-export no longer had their song (paid-for searches, kept for reference) |
 | `work/<playlist>/flagged.csv` | review list of everything still open |
 | `work/<playlist>/flagged_<date>.csv` | just that day's batch |
 | `work/<playlist>/result.json` | id, URL and counts of the playlist that was built |

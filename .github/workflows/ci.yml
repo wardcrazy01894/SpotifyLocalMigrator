@@ -18,7 +18,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m py_compile migrate.py
-      - run: pipx run ruff==0.17.0 check migrate.py tests
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check migrate.py tests
       - run: python -m unittest discover -s tests -v
   # Stable name for the branch-protection required check. `if: always()` makes it run (and fail)
   # when a matrix leg fails or is cancelled; a skipped job would count as a passing required check.
