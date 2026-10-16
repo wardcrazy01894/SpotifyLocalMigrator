@@ -3,6 +3,10 @@
 Run: python3 -m unittest discover -s tests
 No network: anything that would call the Spotify API is monkeypatched.
 """
+import argparse
+import contextlib
+import csv
+import io
 import json
 import sys
 import tempfile
@@ -85,6 +89,10 @@ class Wanted(unittest.TestCase):
         self.assertFalse(mg.wanted({"verdict": "title_variant", "uri": "spotify:track:a"}))
         self.assertFalse(mg.wanted({"verdict": "match", "uri": None}))
         self.assertFalse(mg.wanted(None))
+
+    def test_recheck_is_open_not_wanted(self):
+        self.assertFalse(mg.wanted({"verdict": "match", "uri": "spotify:track:a", "recheck": True}))
+        self.assertFalse(mg.wanted({"verdict": "title_variant", "uri": "spotify:track:a", "approved": True, "recheck": True}))
 
 
 SRC = {"name": "T", "id": "p", "items": [
@@ -252,7 +260,7 @@ class ReorderPlaylistCalls(unittest.TestCase):
         orig = mg._call
 
         def fake(method, path, params=None, body=None):
-            calls.append((method, path, dict(body)))
+            calls.append((method, path, dict(body or {})))
             return {"snapshot_id": f"snap{len(calls)}"}
 
         mg._call = fake
@@ -264,9 +272,21 @@ class ReorderPlaylistCalls(unittest.TestCase):
         finally:
             mg._call = orig
         self.assertEqual(n, 2)
-        self.assertEqual([c[0:2] for c in calls], [("PUT", "/playlists/PID/items")] * 2)
-        self.assertNotIn("snapshot_id", calls[0][2])
+        # the current snapshot is read first so even the first move is rejected if the playlist changed
+        self.assertEqual(calls[0][0:2], ("GET", "/playlists/PID"))
+        self.assertEqual([c[0:2] for c in calls[1:]], [("PUT", "/playlists/PID/items")] * 2)
         self.assertEqual(calls[1][2]["snapshot_id"], "snap1")
+        self.assertEqual(calls[2][2]["snapshot_id"], "snap2")
+
+    def test_no_moves_means_no_calls(self):
+        calls = []
+        orig = mg._call
+        mg._call = lambda *a, **k: calls.append(a) or {}
+        try:
+            n = mg.reorder_playlist("PID", ["spotify:track:A", "spotify:track:B"], ["spotify:track:A", "spotify:track:B"])
+        finally:
+            mg._call = orig
+        self.assertEqual((n, calls), (0, []))
 
 
 class MergePlaylistCalls(unittest.TestCase):
@@ -307,6 +327,78 @@ class VerifySummary(unittest.TestCase):
         v = mg.verify_summary(SRC, CACHE, ["spotify:track:R0", "spotify:track:B", "spotify:track:ZZZ"])
         self.assertEqual(v["missing_tracks"], ["spotify:track:A"])
         self.assertEqual(v["extra_tracks"], ["spotify:track:ZZZ"])
+
+    def test_local_file_of_a_built_song_is_extra_not_complete(self):
+        # #2 was dragged in as a local file earlier, then approved: the song is now in the playlist twice
+        cache = {k: dict(v) for k, v in CACHE.items()}
+        cache["5"] = {"verdict": "no_match", "uri": None, "keep_local": True, "approved": False}
+        live = ["spotify:track:R0", "spotify:track:A", "spotify:track:B", SRC["items"][4]["uri"], SRC["items"][5]["uri"],
+                SRC["items"][2]["uri"]]
+        v = mg.verify_summary(SRC, cache, live)
+        self.assertEqual(v["extra_local"], [SRC["items"][2]["uri"]])
+        self.assertFalse(v["complete"])
+
+    def test_rechecked_song_is_unresolved(self):
+        cache = {k: dict(v) for k, v in CACHE.items()}
+        cache["1"]["recheck"] = True
+        v = mg.verify_summary(SRC, cache, ["spotify:track:R0", "spotify:track:A", "spotify:track:B"])
+        self.assertIn(1, [it["pos"] for it in v["unresolved"]])
+        self.assertEqual(v["extra_tracks"], [])  # #3 still wants track A; the duplicate is not collapsed now
+        self.assertEqual(v["dupes"], 0)
+
+
+class VerifyCommandAdvice(unittest.TestCase):
+    """The closing line of `verify` must name a step that can actually finish the job."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE, mg.live_uris)
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = root, root / "approvals.json", "T"
+        wd = root / "t"
+        wd.mkdir()
+        self.items = [local(0, "A", "a", 100), local(1, "L", "l", 100)]
+        (wd / "source.json").write_text(json.dumps({"name": "T", "id": "p", "items": self.items}))
+        (wd / "matches.json").write_text(json.dumps({
+            "0": {"verdict": "match", "uri": "spotify:track:A", "key": mg.song_key(self.items[0])},
+            "1": {"verdict": "no_match", "uri": None, "keep_local": True, "approved": False, "key": mg.song_key(self.items[1])},
+        }))
+        (wd / "result.json").write_text(json.dumps({"playlist_id": "PID", "url": "u", "count": 1}))
+
+    def tearDown(self):
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE, mg.live_uris = self.saved
+        self.tmp.cleanup()
+
+    def _verify(self, live):
+        mg.live_uris = lambda pid: live
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            mg.cmd_verify(argparse.Namespace())
+        return out.getvalue().strip().splitlines()[-1]
+
+    def test_unwanted_track_with_local_files_present_is_a_by_hand_step(self):
+        # merge mode never removes tracks, so "run build" would loop forever
+        last = self._verify(["spotify:track:A", "spotify:track:OLD", self.items[1]["uri"]])
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand.")
+        last = self._verify(["spotify:track:OLD", self.items[1]["uri"]])
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand, then run `build`.")  # track A missing
+
+    def test_unwanted_track_plus_extra_and_missing_local_files_are_all_named(self):
+        last = self._verify(["spotify:track:A", "spotify:track:OLD", "spotify:local:x:x:stray:1"])
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand and the 1 extra local file(s); paste the 1 missing local file(s) in.")
+        last = self._verify(["spotify:track:OLD", "spotify:local:x:x:stray:1"])  # track A missing too
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand and the 1 extra local file(s); paste the 1 missing local file(s) in, then run `build`.")
+
+    def test_unwanted_track_without_local_files_is_fixed_by_build(self):
+        last = self._verify(["spotify:track:A", "spotify:track:OLD"])
+        self.assertEqual(last, "All decided, but the playlist does not match the decisions; run `build`.")
+
+    def test_extra_and_missing_local_files_are_both_named(self):
+        last = self._verify(["spotify:track:A", "spotify:local:x:x:stray:1"])
+        self.assertEqual(last, "All decided; remove the 1 extra local file(s) above by hand and paste the 1 missing one(s) in to finish (`build` never removes local files).")
+
+    def test_complete(self):
+        self.assertEqual(self._verify(["spotify:track:A", self.items[1]["uri"]]), "COMPLETE: every source song is accounted for in the new playlist.")
 
 
 class CacheAlignment(unittest.TestCase):
@@ -586,6 +678,76 @@ class ApproveCommand(unittest.TestCase):
         self.assertTrue(c["0"]["keep_local"])
         self.assertTrue(c["2"]["approved"])
 
+    def test_recheck_reopens_an_approved_song_and_forgets_the_rule(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(pos="2"))
+        self.assertIn(mg.song_key(self.src["items"][2]), mg.load_global())
+        with self.quiet:
+            mg.cmd_approve(self._args(recheck="2"))
+        c = self._cache()
+        self.assertTrue(c["2"]["recheck"])
+        self.assertNotIn("approved", c["2"])
+        self.assertFalse(mg.wanted(c["2"]))
+        self.assertNotIn(mg.song_key(self.src["items"][2]), mg.load_global())
+        rows = list(csv.DictReader((self.wd / "flagged.csv").open()))
+        self.assertEqual([(r["pos"], r["reason"]) for r in rows], [("2", "duration_mismatch (recheck)")])
+        summary = json.loads((self.wd / "summary.json").read_text())
+        self.assertEqual(summary["counts"].get("recheck"), 1)
+        self.assertEqual(summary["in_playlist_after_build"], 0)
+
+    def test_recheck_warns_about_a_twin_still_wanted_and_blocks_global_reapply(self):
+        twin = local(3, "C", "c", 100)
+        self.src["items"].append(twin)
+        (self.wd / "source.json").write_text(json.dumps(self.src))
+        c = self._cache()
+        c["3"] = {"verdict": "duration_mismatch", "uri": "spotify:track:C", "title": "C", "artist": "c", "key": mg.song_key(twin)}
+        (self.wd / "matches.json").write_text(json.dumps(c))
+        with self.quiet:
+            mg.cmd_approve(self._args(reasons="duration_mismatch"))  # approves #2 and #3, records the standing rule
+        err = io.StringIO()
+        with self.quiet, contextlib.redirect_stderr(err):
+            mg.cmd_approve(self._args(recheck="2"))
+        self.assertIn("also at #3", err.getvalue())
+        c = self._cache()
+        self.assertTrue(c["2"]["recheck"])
+        self.assertNotIn("approved", c["2"])
+        self.assertTrue(c["3"]["approved"])  # the twin is untouched; the note tells the owner
+        # a standing rule recorded later for the same song must not quietly re-approve the open entry
+        mg.record_global(twin, c["3"], "approve", "T")
+        self.assertEqual(mg.apply_global(self.src, c), 0)
+        self.assertNotIn("approved", c["2"])
+        # naming both twins in one --recheck gives no note about the other
+        with self.quiet:
+            mg.cmd_approve(self._args(pos="2"))
+        err = io.StringIO()
+        with self.quiet, contextlib.redirect_stderr(err):
+            mg.cmd_approve(self._args(recheck="2,3"))
+        self.assertNotIn("also at", err.getvalue())
+        c = self._cache()
+        self.assertTrue(c["2"]["recheck"] and c["3"]["recheck"])
+
+    def test_recheck_on_keep_local_is_refused(self):
+        err = io.StringIO()
+        with self.quiet, contextlib.redirect_stderr(err):
+            mg.cmd_approve(self._args(recheck="0"))
+        self.assertNotIn("recheck", self._cache()["0"])
+        self.assertIn("ignored #0: keep-local", err.getvalue())
+
+    def test_bulk_approve_leaves_rechecks_alone_but_explicit_pos_resolves(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(recheck="2"))
+        err = io.StringIO()
+        with self.quiet, contextlib.redirect_stderr(err):
+            mg.cmd_approve(self._args(reasons="duration_mismatch"))
+        self.assertTrue(self._cache()["2"]["recheck"])
+        self.assertIn("skipped #2: marked recheck", err.getvalue())
+        with self.quiet:
+            mg.cmd_approve(self._args(pos="2"))
+        c = self._cache()
+        self.assertTrue(c["2"]["approved"])
+        self.assertNotIn("recheck", c["2"])
+        self.assertTrue(mg.wanted(c["2"]))
+
 
 class RetryAfter(unittest.TestCase):
     def test_parses_int_float_and_garbage(self):
@@ -720,3 +882,190 @@ class CarryKnownMatches(unittest.TestCase):
         summary = json.loads((self.root / "t" / "summary.json").read_text())
         self.assertEqual(summary["searched"], 4)
         self.assertEqual(summary["in_playlist_after_build"], 4)
+
+
+class MatchAfterReexport(unittest.TestCase):
+    """`match` must align the cache first: a re-export that inserts a song shifts every position."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE)
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = root, root / "approvals.json", "T"
+        self.wd = root / "t"
+        self.wd.mkdir()
+        self.a, self.b = local(0, "A", "a", 100), local(1, "B", "b", 100)
+        self.new = local(0, "New", "n", 100)
+        old = {str(it["pos"]): CarryKnownMatches._match(it, f"spotify:track:{it['title']}") for it in (self.a, self.b)}
+        (self.wd / "matches.json").write_text(json.dumps(old))
+        # re-exported: New inserted at the top, A and B shift down by one
+        items = [self.new, dict(self.a, pos=1), dict(self.b, pos=2)]
+        (self.wd / "source.json").write_text(json.dumps({"name": "T", "id": "t", "items": items}))
+        self.calls = []
+        self.orig = mg.search_candidates
+        mg.search_candidates = self._search
+
+    def tearDown(self):
+        mg.search_candidates = self.orig
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = self.saved
+        self.tmp.cleanup()
+
+    def _search(self, it):
+        self.calls.append(it["pos"])
+        return [cand(it["title"], [it["artist"]], it["duration_ms"], uri=f"spotify:track:{it['title']}")]
+
+    def _run(self):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            mg.cmd_match(argparse.Namespace(limit=None))
+        return json.loads((self.wd / "matches.json").read_text())
+
+    def test_only_the_new_song_is_searched_and_old_entries_follow_their_songs(self):
+        cache = self._run()
+        self.assertEqual(self.calls, [0])
+        self.assertEqual({k: v["uri"] for k, v in cache.items()},
+                         {"0": "spotify:track:New", "1": "spotify:track:A", "2": "spotify:track:B"})
+        self.assertEqual(cache["1"]["key"], mg.song_key(self.a))
+        self.assertNotIn("carried_from", cache["1"])
+
+    def test_standing_decision_for_the_new_song_does_not_land_on_the_shifted_entry(self):
+        mg.GLOBAL_APPROVALS.write_text(json.dumps({
+            mg.song_key(self.new): {"decision": "approve", "uri": "spotify:track:Elsewhere", "from_playlist": "P"},
+        }))
+        cache = self._run()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(cache["0"]["uri"], "spotify:track:Elsewhere")
+        self.assertTrue(cache["0"]["approved"])
+        self.assertEqual(cache["1"]["uri"], "spotify:track:A")  # untouched: still A's own exact match
+        self.assertNotIn("approved", cache["1"])
+        self.assertNotIn("carried_from", cache["1"])
+
+
+class SearchCandidates(unittest.TestCase):
+    def test_null_items_in_search_results_are_skipped(self):
+        it = local(0, "Song", "Artist", 100)
+        good = cand("Song", ["Artist"], 100000, uri="spotify:track:good")
+        good["id"] = "good"
+        orig = mg.api_get
+        mg.api_get = lambda path, **params: {"tracks": {"items": [None, good]}}
+        try:
+            cands = mg.search_candidates(it)
+        finally:
+            mg.api_get = orig
+        self.assertEqual([c["uri"] for c in cands], ["spotify:track:good"])
+
+
+class BuildCommand(unittest.TestCase):
+    """cmd_build end to end against a fake API: create, rewrite and merge modes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE, mg._call, mg.resolve_playlist, mg.live_uris)
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = root, root / "approvals.json", "T"
+        self.wd = root / "t"
+        self.wd.mkdir()
+        self.calls = []
+        self.fail_on = None  # (method, path-substring) that raises RuntimeError
+        self.live = []
+        mg._call = self._call
+        mg.resolve_playlist = lambda ref: {"id": "PID", "name": "P", "external_urls": {"spotify": "https://open.spotify.com/playlist/PID"}}
+        mg.live_uris = lambda pid: list(self.live)
+
+    def tearDown(self):
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE, mg._call, mg.resolve_playlist, mg.live_uris = self.saved
+        self.tmp.cleanup()
+
+    def _call(self, method, path, params=None, body=None):
+        self.calls.append((method, path, body))
+        if self.fail_on and method == self.fail_on[0] and self.fail_on[1] in path:
+            raise RuntimeError("boom")
+        if method == "POST" and path == "/me/playlists":
+            return {"id": "NEW", "external_urls": {"spotify": "https://open.spotify.com/playlist/NEW"}}
+        if method == "GET":
+            return {"items": {"total": 7}, "snapshot_id": "s0"}
+        return {"snapshot_id": f"s{len(self.calls)}"}
+
+    def _source(self, n_local, n_remote=0):
+        items = [remote(i, f"spotify:track:R{i}") for i in range(n_remote)]
+        items += [local(n_remote + i, f"L{i}", "x", 100) for i in range(n_local)]
+        cache = {str(it["pos"]): {"verdict": "match", "uri": f"spotify:track:{it['title']}", "key": mg.song_key(it)}
+                 for it in items if it["is_local"]}
+        (self.wd / "source.json").write_text(json.dumps({"name": "T", "id": "t", "items": items}))
+        (self.wd / "matches.json").write_text(json.dumps(cache))
+        return items
+
+    def _args(self, **kw):
+        base = {"name": None, "update": None, "new": False, "keep_duplicates": False, "dry_run": False}
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _build(self, **kw):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            mg.cmd_build(self._args(**kw))
+        return out.getvalue(), err.getvalue()
+
+    def test_create_remembers_the_playlist_before_adding_tracks(self):
+        self._source(3)
+        self.fail_on = ("POST", "/playlists/NEW/items")
+        with self.assertRaises(RuntimeError), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            mg.cmd_build(self._args())
+        res = json.loads((self.wd / "result.json").read_text())
+        self.assertEqual((res["playlist_id"], res["count"]), ("NEW", 0))
+        self.assertEqual(self.calls[0][0:2], ("POST", "/me/playlists"))
+        self.assertEqual(self.calls[0][2]["name"], "T (Spotify version)")
+        self.assertEqual(self.calls[1], ("PUT", "/playlists/NEW", {"public": False}))
+
+    def test_create_adds_in_batches_of_100_and_records_the_result(self):
+        self._source(150)
+        self._build()
+        adds = [c for c in self.calls if c[0] == "POST" and c[1] == "/playlists/NEW/items"]
+        self.assertEqual([len(c[2]["uris"]) for c in adds], [100, 50])
+        self.assertNotIn("position", adds[0][2])
+        res = json.loads((self.wd / "result.json").read_text())
+        self.assertEqual((res["playlist_id"], res["count"], res["on_spotify"], res["duplicates_collapsed"]), ("NEW", 150, 7, 0))
+
+    def test_existing_playlist_without_local_files_is_rewritten(self):
+        self._source(120)
+        (self.wd / "result.json").write_text(json.dumps({"playlist_id": "PID", "url": "u", "count": 0}))
+        self.live = ["spotify:track:OLD"]
+        self._build()
+        writes = [c for c in self.calls if c[1] == "/playlists/PID/items"]
+        self.assertEqual([(c[0], len(c[2]["uris"])) for c in writes], [("PUT", 100), ("POST", 20)])
+        self.assertNotIn(("POST", "/me/playlists"), [c[0:2] for c in self.calls])
+
+    def test_existing_playlist_with_local_files_is_merged_then_reordered(self):
+        items = self._source(3, n_remote=1)
+        cache = json.loads((self.wd / "matches.json").read_text())
+        cache["3"] = {"verdict": "no_match", "uri": None, "keep_local": True, "approved": False, "key": mg.song_key(items[3])}
+        (self.wd / "matches.json").write_text(json.dumps(cache))
+        (self.wd / "result.json").write_text(json.dumps({"playlist_id": "PID", "url": "u", "count": 0}))
+        # source order: R0, L0, L1, L2(local). Live: L1 missing, and L0 sits after the pasted local file.
+        self.live = ["spotify:track:R0", items[3]["uri"], "spotify:track:L0"]
+        out, _ = self._build()
+        self.assertIn("Merging into", out)
+        posts = [c for c in self.calls if c[0] == "POST"]
+        self.assertEqual(posts, [("POST", "/playlists/PID/items", {"uris": ["spotify:track:L1"], "position": 1})])
+        moves = [c[2] for c in self.calls if c[0] == "PUT" and c[1] == "/playlists/PID/items"]
+        # live_uris is static in this test, so the reorder plan is against the pre-merge list: L0 moves up
+        self.assertEqual([(m["range_start"], m["insert_before"]) for m in moves], [(2, 1)])
+        self.assertTrue(all("snapshot_id" in m for m in moves))
+
+    def test_dry_run_makes_no_write_calls(self):
+        items = self._source(2)
+        (self.wd / "result.json").write_text(json.dumps({"playlist_id": "PID", "url": "u", "count": 0}))
+        self.live = ["spotify:track:L1", items[0]["uri"]]
+        out, _ = self._build(dry_run=True)
+        self.assertIn("would insert 1 track(s) in 1 call(s)", out)
+        self.assertEqual([c for c in self.calls if c[0] != "GET"], [])
+        self.live = ["spotify:track:OLD"]
+        out, _ = self._build(dry_run=True)
+        self.assertIn("would replace the 1 item(s)", out)
+        self.assertEqual([c for c in self.calls if c[0] != "GET"], [])
+
+    def test_keep_duplicates_is_flagged_as_ignored_when_merging(self):
+        items = self._source(1)
+        (self.wd / "result.json").write_text(json.dumps({"playlist_id": "PID", "url": "u", "count": 0}))
+        self.live = ["spotify:track:L0", items[0]["uri"]]
+        _, err = self._build(keep_duplicates=True, dry_run=True)
+        self.assertIn("--keep-duplicates is ignored", err)
