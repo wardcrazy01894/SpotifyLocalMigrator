@@ -257,7 +257,8 @@ class ApiError(RuntimeError):
 
 class RateLimited(Exception):
     def __init__(self, wait_s: int, note: str = ""):
-        when = f"{wait_s / 3600:.1f} h" if wait_s >= 3600 else f"{-(-wait_s // 60)} min" if wait_s >= 60 else f"{wait_s}s"
+        # rounded up at every scale, so the message never promises less than the real wait
+        when = f"{-(-wait_s // 360) / 10:.1f} h" if wait_s >= 3600 else f"{-(-wait_s // 60)} min" if wait_s >= 60 else f"{wait_s}s"
         super().__init__(f"Spotify rate limit ({note}); retry after {when}" if note else f"Spotify rate limit; retry after {when}")
         self.wait_s = wait_s
 

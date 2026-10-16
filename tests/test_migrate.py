@@ -565,6 +565,8 @@ class CallRetries(unittest.TestCase):
         self.assertIn("retry after 3 min", str(mg.RateLimited(150)))  # rounded up, never under-promised
         self.assertIn("retry after 60 min", str(mg.RateLimited(3599)))
         self.assertIn("retry after 1.0 h", str(mg.RateLimited(3600)))
+        self.assertIn("retry after 1.1 h", str(mg.RateLimited(3659)))
+        self.assertIn("retry after 24.0 h", str(mg.RateLimited(86400)))
 
     def test_non_json_body_is_an_api_error_naming_the_call(self):
         with self.assertRaises(mg.ApiError) as cm:
