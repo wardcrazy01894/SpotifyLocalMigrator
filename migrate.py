@@ -827,7 +827,7 @@ def load_state() -> tuple[Path, dict, dict]:
 
 
 def cmd_approve(args) -> None:
-    """Mark flagged tracks as approved (added on next build) / keep-local / recheck."""
+    """Mark flagged tracks as approved (added on next build) / keep-local / recheck, or unkeep a keep-local one."""
     wd, src, cache = load_state()
     reasons = set(filter(None, (args.reasons or "").split(",")))
     positions = {int(x) for x in filter(None, (args.pos or "").split(","))}
@@ -942,7 +942,7 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
     """Pure part of `verify`. `live` is the new playlist's uri list in order (local files included).
 
     Done means: every source song is either a Spotify track that is present, a local file that
-    has been dragged in, or one of the collapsed duplicates; and nothing undecided remains."""
+    has been pasted in, or one of the collapsed duplicates; and nothing undecided remains."""
     expected, dupes = desired_uris(src, cache, False)
     live_spotify = [u for u in live if u.startswith("spotify:track:")]
     live_local = {u for u in live if u.startswith("spotify:local:")}
@@ -975,7 +975,7 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
 
 def cmd_verify(args) -> None:
     """Completeness check: every source song is in the new playlist (as a Spotify track or a
-    dragged-in local file) or is a collapsed duplicate, and nothing is undecided."""
+    pasted-in local file) or is a collapsed duplicate, and nothing is undecided."""
     wd, src, cache = load_state()
     rp = wd / "result.json"
     if not rp.exists():
@@ -996,7 +996,7 @@ def cmd_verify(args) -> None:
         print(f"    missing from playlist: {u}")
     for u in v["extra_tracks"][:20]:
         print(f"    in playlist but not wanted: {u}")
-    print(f"  Local files to drag in by hand: {len(v['keep_local'])}  (present now: {v['live_local']})")
+    print(f"  Local files to paste in by hand: {len(v['keep_local'])}  (present now: {v['live_local']})")
     if len(v["missing_local"]) != len(v["keep_local"]):
         print(f"  Still missing: {len(v['missing_local'])}")
     for it in v["missing_local"][:20]:
@@ -1017,7 +1017,7 @@ def cmd_verify(args) -> None:
     if v["complete"]:
         print("COMPLETE: every source song is accounted for in the new playlist.")
     elif not unresolved and ok:
-        print(f"All decided; drag the {len(v['missing_local'])} remaining local file(s) in to finish.")
+        print(f"All decided; paste the {len(v['missing_local'])} remaining local file(s) in to finish (see paste_local.txt).")
     elif not unresolved:
         print("All decided, but the playlist does not match the decisions; run `build`.")
 
@@ -1054,7 +1054,7 @@ def live_uris(playlist_id: str) -> list[str]:
 
 def full_order(src: dict, cache: dict) -> list[str]:
     """The finished playlist in source order: wanted Spotify tracks plus the local files the
-    owner drags in by hand (their spotify:local: uris). Used as the anchor list when merging."""
+    owner pastes in by hand (their spotify:local: uris). Used as the anchor list when merging."""
     out: list[str] = []
     seen: set[str] = set()
     for it in src["items"]:
@@ -1281,7 +1281,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-w", "--work", help="which exported playlist to operate on (its name); default: the last one exported")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("auth").set_defaults(fn=cmd_auth)
+    sub.add_parser("auth", help="one-time browser login; stores token.json").set_defaults(fn=cmd_auth)
     f = sub.add_parser("find", help="list your playlists whose name contains <name>")
     f.add_argument("name")
     f.set_defaults(fn=cmd_find)
@@ -1313,7 +1313,7 @@ def main() -> None:
 
     def build_opts(sp):
         sp.add_argument("--name", help="name for the new playlist")
-        sp.add_argument("--update", help="rewrite this existing playlist (URL/id/name:...) instead of creating one")
+        sp.add_argument("--update", help="bring this existing playlist (URL/id/name:...) up to date instead of creating one")
         sp.add_argument("--new", action="store_true", help="force creating a new playlist even if result.json exists")
         sp.add_argument("--keep-duplicates", action="store_true")
         sp.add_argument("--dry-run", action="store_true")

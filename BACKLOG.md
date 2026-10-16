@@ -5,7 +5,7 @@ first pass adds exact matches only (title + artist + duration), then the owner
 reviews the flagged breakdown and approves additions by reason or position.
 Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
-## Done — all 10 playlists COMPLETE (2026-10-15)
+## Done — all 11 playlists COMPLETE (2026-10-15)
 
 | Playlist | Songs | Spotify | Local | Result |
 |---|---|---|---|---|
@@ -23,7 +23,7 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 Totals: 3973 source songs → 3618 Spotify tracks + 345 local files + 10 collapsed duplicates.
 iPhone took 2026-10-08 to 2026-10-14 (daily search budget 423–492 songs plus a few
-re-searches before a 429); the other 8 playlists were done on 2026-10-14 in one evening
+re-searches before a 429); the other 9 playlists were done on 2026-10-14 in one evening
 because decisions and exact matches carry over (599 songs needed 106 searches).
 All 23 "different version" (B2) flags were kept local by the owner.
 
@@ -34,7 +34,7 @@ Nothing. Open a new row here if a source playlist changes; `export` → `match` 
 
 Standing rules:
 - A decision (approve / keep local) made for a song in one playlist applies to the same song in every playlist (`work/approvals.json`); exact matches found in any playlist are reused too (PR #8), so only unseen songs cost a search.
-- A playlist is only done when `verify` says COMPLETE: source count == Spotify tracks in the new playlist + local files pasted in by hand.
+- A playlist is only done when `verify` says COMPLETE: source count == Spotify tracks in the new playlist + local files pasted in by hand + collapsed duplicates.
 - Once the daily search budget is exhausted, every endpoint answers 429 until the window resets, so run `build` / `verify` before the day's last searches.
 
 Per playlist:
@@ -43,7 +43,7 @@ Per playlist:
 export SPOTIFY_CLIENT_ID=$(cat client_id.txt)
 python3 migrate.py export "name:<Playlist>"
 python3 migrate.py -w "<Playlist>" match
-python3 migrate.py -w "<Playlist>" build --name "<Playlist> (Spotify version)"
+python3 migrate.py -w "<Playlist>" build          # named "<Playlist> (Spotify version)" by default
 # review work/<playlist>/flagged.csv, then:
 python3 migrate.py -w "<Playlist>" approve --pos ... --keep-local ...
 python3 migrate.py -w "<Playlist>" build
