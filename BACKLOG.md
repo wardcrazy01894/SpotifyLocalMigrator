@@ -23,7 +23,7 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 Totals: 3973 source songs → 3618 Spotify tracks + 345 local files + 10 collapsed duplicates.
 iPhone took 2026-10-08 to 2026-10-14 (daily search budget 423–492 songs plus a few
-re-searches before a 429); the other 9 playlists were done on 2026-10-14 in one evening
+re-searches before a 429); the other 9 playlists were built and decided on 2026-10-14 in one evening (verified 2026-10-14/15)
 because decisions and exact matches carry over (599 songs needed 106 searches).
 All 23 "different version" (B2) flags were kept local by the owner.
 

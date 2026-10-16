@@ -66,7 +66,7 @@ python3 migrate.py match                            # search Spotify for every s
 python3 migrate.py build                            # create "Pry (Spotify version)" with exact matches only
 ```
 
-Small playlist? `python3 migrate.py all "name:Pry"` does export, match and build in one go (`--limit N` caps the searches). `build --name` picks a different name for the new playlist.
+Small playlist? `python3 migrate.py all "name:Pry"` does export, match and build in one go (`--limit N` caps how many songs are searched). `build --name` picks a different name for the new playlist.
 
 You'll get a breakdown like this:
 
@@ -105,7 +105,7 @@ python3 migrate.py research --pos 223 --pick spotify:track:…  # or name the tr
 python3 migrate.py approve --unkeep 141                      # changed my mind, reopen it
 python3 migrate.py build                                     # bring the playlist up to date, same URL
 python3 migrate.py verify                                    # are we done yet?
-python3 migrate.py report --batch 2026-10-07                # re-print the breakdown; also rewrite that day's flagged_<date>.csv
+python3 migrate.py report --batch 2026-10-07                 # re-print the breakdown; also rewrite that day's flagged_<date>.csv
 ```
 
 ```

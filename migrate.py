@@ -1064,7 +1064,7 @@ def full_order(src: dict, cache: dict) -> list[str]:
         elif wanted(m):
             u = m["uri"]
         else:
-            u = it["uri"]  # local file; present only if the owner dragged it in
+            u = it["uri"]  # local file; present only if the owner pasted (or dragged) it in
         if u and u not in seen:
             seen.add(u)
             out.append(u)
@@ -1075,7 +1075,7 @@ def plan_merge(order: list[str], live: list[str]) -> list[tuple[int, list[str]]]
     """Pure part of the merge: which Spotify tracks are missing and where each run goes.
 
     Each missing track is inserted just before the next item in `order` that is already in the
-    playlist (a Spotify track or a dragged-in local file), so the source order survives.
+    playlist (a Spotify track or a pasted-in local file), so the source order survives.
     Returns (position, uris) inserts to apply in sequence; positions account for earlier inserts."""
     present = set(live)
     next_present: list[str | None] = [None] * len(order)
@@ -1222,7 +1222,7 @@ def cmd_build(args) -> None:
                 print(f"  dry run: would insert {sum(len(r) for _, r in plan)} track(s) in {len(plan)} call(s), then move {len(moves)} item(s)")
             return
         if has_local:
-            # Local files have been dragged in by hand; a full replace would drop them
+            # Local files have been pasted (or dragged) in by hand; a full replace would drop them
             # (the API cannot add local files). Merge instead, inserting new tracks in order.
             order = full_order(src, cache)
             merge_playlist(pl["id"], order, live)
@@ -1312,7 +1312,7 @@ def main() -> None:
     rp.set_defaults(fn=cmd_report)
 
     def build_opts(sp):
-        sp.add_argument("--name", help="name for the new playlist")
+        sp.add_argument("--name", help="name for the new playlist (default: '<source name> (Spotify version)')")
         sp.add_argument("--update", help="bring this existing playlist (URL/id/name:...) up to date instead of creating one")
         sp.add_argument("--new", action="store_true", help="force creating a new playlist even if result.json exists")
         sp.add_argument("--keep-duplicates", action="store_true")
