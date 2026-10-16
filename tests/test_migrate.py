@@ -381,7 +381,11 @@ class VerifyCommandAdvice(unittest.TestCase):
         last = self._verify(["spotify:track:A", "spotify:track:OLD", self.items[1]["uri"]])
         self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand.")
         last = self._verify(["spotify:track:OLD", self.items[1]["uri"]])
-        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand, then run `build`.")
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand, then run `build`.")  # track A missing
+
+    def test_unwanted_track_plus_extra_and_missing_local_files_are_all_named(self):
+        last = self._verify(["spotify:track:A", "spotify:track:OLD", "spotify:local:x:x:stray:1"])
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand and the 1 extra local file(s), paste the 1 missing local file(s) in.")
 
     def test_unwanted_track_without_local_files_is_fixed_by_build(self):
         last = self._verify(["spotify:track:A", "spotify:track:OLD"])

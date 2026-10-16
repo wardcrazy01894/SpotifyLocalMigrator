@@ -875,7 +875,8 @@ def cmd_approve(args) -> None:
             changed += 1
             print(f"  recheck #{it['pos']}: {it['title']} — {it['artist']}  (open; use research or approve --pos)")
             twins = [o["pos"] for o in src["items"] if has_identity(it) and o["pos"] != it["pos"] and o["pos"] not in recheck
-                     and o["is_local"] and song_key(o) == song_key(it) and wanted(cache.get(str(o["pos"])))]
+                     and o["is_local"] and song_key(o) == song_key(it) and wanted(cache.get(str(o["pos"])))
+                     and cache[str(o["pos"])].get("uri") == m.get("uri")]
             if twins:
                 print(f"    NOTE: the same song is also at #{','.join(map(str, twins))} with the same track; recheck those too if it is wrong",
                       file=sys.stderr)
@@ -1043,8 +1044,14 @@ def cmd_verify(args) -> None:
         print(f"All decided; {todo} to finish (`build` never removes local files).")
     elif not unresolved and v["extra_tracks"] and v["live_local"]:
         # merge mode (local files present) never removes tracks, so `build` alone cannot fix this
-        print(f"All decided; remove the {len(v['extra_tracks'])} unwanted Spotify track(s) above by hand"
-              f"{', then run `build`' if v['missing_tracks'] or v['missing_local'] else ''}.")
+        todo = f"remove the {len(v['extra_tracks'])} unwanted Spotify track(s) above by hand"
+        if v["extra_local"]:
+            todo += f" and the {len(v['extra_local'])} extra local file(s)"
+        if v["missing_local"]:
+            todo += f", paste the {len(v['missing_local'])} missing local file(s) in"
+        if v["missing_tracks"]:
+            todo += ", then run `build`"
+        print(f"All decided; {todo}.")
     elif not unresolved:
         print("All decided, but the playlist does not match the decisions; run `build`.")
 
