@@ -556,7 +556,7 @@ class CallRetries(unittest.TestCase):
     def test_long_retry_after_names_the_call(self):
         with self.assertRaises(mg.RateLimited) as cm:
             self._run("POST", [(429, 86400)])
-        self.assertEqual(str(cm.exception), "Spotify rate limit (POST https://api.spotify.com/v1/x); retry after 24.0 h")
+        self.assertEqual(str(cm.exception), "Spotify rate limit (POST https://api.spotify.com/v1/x); retry after 24.1 h")  # 86400 + 1 s, rounded up
 
     def test_rate_limited_wait_wording(self):
         self.assertIn("retry after 0s", str(mg.RateLimited(0)))
