@@ -347,6 +347,54 @@ class VerifySummary(unittest.TestCase):
         self.assertEqual(v["dupes"], 0)
 
 
+class VerifyCommandAdvice(unittest.TestCase):
+    """The closing line of `verify` must name a step that can actually finish the job."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE, mg.live_uris)
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE = root, root / "approvals.json", "T"
+        wd = root / "t"
+        wd.mkdir()
+        self.items = [local(0, "A", "a", 100), local(1, "L", "l", 100)]
+        (wd / "source.json").write_text(json.dumps({"name": "T", "id": "p", "items": self.items}))
+        (wd / "matches.json").write_text(json.dumps({
+            "0": {"verdict": "match", "uri": "spotify:track:A", "key": mg.song_key(self.items[0])},
+            "1": {"verdict": "no_match", "uri": None, "keep_local": True, "approved": False, "key": mg.song_key(self.items[1])},
+        }))
+        (wd / "result.json").write_text(json.dumps({"playlist_id": "PID", "url": "u", "count": 1}))
+
+    def tearDown(self):
+        mg.WORK_ROOT, mg.GLOBAL_APPROVALS, mg.WORK_OVERRIDE, mg.live_uris = self.saved
+        self.tmp.cleanup()
+
+    def _verify(self, live):
+        mg.live_uris = lambda pid: live
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            mg.cmd_verify(argparse.Namespace())
+        return out.getvalue().strip().splitlines()[-1]
+
+    def test_unwanted_track_with_local_files_present_is_a_by_hand_step(self):
+        # merge mode never removes tracks, so "run build" would loop forever
+        last = self._verify(["spotify:track:A", "spotify:track:OLD", self.items[1]["uri"]])
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand.")
+        last = self._verify(["spotify:track:OLD", self.items[1]["uri"]])
+        self.assertEqual(last, "All decided; remove the 1 unwanted Spotify track(s) above by hand, then run `build`.")
+
+    def test_unwanted_track_without_local_files_is_fixed_by_build(self):
+        last = self._verify(["spotify:track:A", "spotify:track:OLD"])
+        self.assertEqual(last, "All decided, but the playlist does not match the decisions; run `build`.")
+
+    def test_extra_and_missing_local_files_are_both_named(self):
+        last = self._verify(["spotify:track:A", "spotify:local:x:x:stray:1"])
+        self.assertEqual(last, "All decided; remove the 1 extra local file(s) above by hand and paste the 1 missing one(s) in to finish (`build` never removes local files).")
+
+    def test_complete(self):
+        self.assertEqual(self._verify(["spotify:track:A", self.items[1]["uri"]]), "COMPLETE: every source song is accounted for in the new playlist.")
+
+
 class CacheAlignment(unittest.TestCase):
     def test_backfills_keys(self):
         cache = {"1": {"verdict": "match", "uri": "spotify:track:A"}}
@@ -698,6 +746,15 @@ class ApproveCommand(unittest.TestCase):
         mg.record_global(twin, c["3"], "approve", "T")
         self.assertEqual(mg.apply_global(self.src, c), 0)
         self.assertNotIn("approved", c["2"])
+        # naming both twins in one --recheck gives no note about the other
+        with self.quiet:
+            mg.cmd_approve(self._args(pos="2"))
+        err = io.StringIO()
+        with self.quiet, contextlib.redirect_stderr(err):
+            mg.cmd_approve(self._args(recheck="2,3"))
+        self.assertNotIn("also at", err.getvalue())
+        c = self._cache()
+        self.assertTrue(c["2"]["recheck"] and c["3"]["recheck"])
 
     def test_recheck_on_keep_local_is_refused(self):
         err = io.StringIO()
