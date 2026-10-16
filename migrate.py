@@ -226,7 +226,7 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
                 # Rejected before processing, so retrying is safe for writes too; does not count as an attempt.
                 wait = _retry_after(e.headers)
                 if wait > 120:
-                    raise RateLimited(wait) from None
+                    raise RateLimited(wait, f"{method} {url}") from None
                 if waited + wait > MAX_429_WAIT_S:
                     raise RateLimited(wait, f"{method} {url} still throttled after {waited}s of waiting") from None
                 waited += wait
@@ -257,7 +257,7 @@ class ApiError(RuntimeError):
 
 class RateLimited(Exception):
     def __init__(self, wait_s: int, note: str = ""):
-        when = f"{wait_s / 3600:.1f} h" if wait_s >= 3600 else f"{max(wait_s, 1) / 60:.0f} min" if wait_s >= 60 else f"{wait_s}s"
+        when = f"{wait_s / 3600:.1f} h" if wait_s >= 3600 else f"{-(-wait_s // 60)} min" if wait_s >= 60 else f"{wait_s}s"
         super().__init__(f"Spotify rate limit ({note}); retry after {when}" if note else f"Spotify rate limit; retry after {when}")
         self.wait_s = wait_s
 

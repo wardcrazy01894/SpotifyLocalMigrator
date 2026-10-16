@@ -499,6 +499,19 @@ class CallRetries(unittest.TestCase):
         self.assertIn("GET https://api.spotify.com/v1/x still throttled after 505s", str(cm.exception))
         self.assertIn("retry after 2 min", str(cm.exception))
 
+    def test_long_retry_after_names_the_call(self):
+        with self.assertRaises(mg.RateLimited) as cm:
+            self._run("POST", [(429, 86400)])
+        self.assertEqual(str(cm.exception), "Spotify rate limit (POST https://api.spotify.com/v1/x); retry after 24.0 h")
+
+    def test_rate_limited_wait_wording(self):
+        self.assertIn("retry after 0s", str(mg.RateLimited(0)))
+        self.assertIn("retry after 59s", str(mg.RateLimited(59)))
+        self.assertIn("retry after 1 min", str(mg.RateLimited(60)))
+        self.assertIn("retry after 3 min", str(mg.RateLimited(150)))  # rounded up, never under-promised
+        self.assertIn("retry after 60 min", str(mg.RateLimited(3599)))
+        self.assertIn("retry after 1.0 h", str(mg.RateLimited(3600)))
+
     def test_non_json_body_is_an_api_error_naming_the_call(self):
         with self.assertRaises(mg.ApiError) as cm:
             self._run("GET", [b"<html>captive portal</html>"])
