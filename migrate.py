@@ -72,15 +72,22 @@ def _token_request(data: dict) -> dict:
         data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
+    hint = "If the refresh token was revoked, run: python3 migrate.py auth"
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            tok = json.loads(r.read())
+            raw = r.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
-        sys.exit(f"Spotify token request failed ({e.code}): {detail}\nIf the refresh token was revoked, run: python3 migrate.py auth")
+        sys.exit(f"Spotify token request failed ({e.code}): {detail}\n{hint}")
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
+        sys.exit(f"Spotify token request failed before a reply ({type(e).__name__}: {e}); check the network and retry.")
+    try:
+        tok = json.loads(raw)
+    except ValueError:
+        sys.exit(f"Spotify token request returned something that is not JSON: {raw[:200]!r}\n{hint}")
     tok["expires_at"] = time.time() + tok.get("expires_in", 3600) - 60
     if "refresh_token" not in tok and TOKEN_FILE.exists():
-        tok["refresh_token"] = json.loads(TOKEN_FILE.read_text()).get("refresh_token")
+        tok["refresh_token"] = _load_json(TOKEN_FILE).get("refresh_token")
     # Holds the access and refresh tokens: owner-only.
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     if hasattr(os, "fchmod"):
@@ -112,7 +119,10 @@ def cmd_auth(_args) -> None:
         def log_message(self, *a):
             pass
 
-    srv = http.server.HTTPServer(("127.0.0.1", 8888), Handler)
+    try:
+        srv = http.server.HTTPServer(("127.0.0.1", 8888), Handler)
+    except OSError as e:
+        sys.exit(f"Cannot listen on 127.0.0.1:8888 for the login redirect ({e}); close whatever is using that port and rerun auth.")
     threading.Thread(target=srv.handle_request, daemon=True).start()
 
     url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode(
@@ -156,7 +166,7 @@ def cmd_auth(_args) -> None:
 def access_token() -> str:
     if not TOKEN_FILE.exists():
         sys.exit("Not logged in. Run: python3 migrate.py auth")
-    tok = json.loads(TOKEN_FILE.read_text())
+    tok = _load_json(TOKEN_FILE)
     if time.time() >= tok.get("expires_at", 0):
         if not tok.get("refresh_token"):
             sys.exit("Token expired and no refresh token saved. Run: python3 migrate.py auth")
@@ -180,16 +190,21 @@ def _retry_after(headers) -> int:
         return 3
 
 
+MAX_429_WAIT_S = 600  # total sleeping on 429s for one call before giving up with RateLimited
+
+
 def _call(method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
     """One API call. GETs are retried on 5xx/network errors; writes are not, because a
     retried POST whose first attempt actually landed would insert tracks twice. Rerunning
-    `build` is safe instead: it re-reads the playlist and only adds what is missing."""
+    `build` is safe instead: it re-reads the playlist and only adds what is missing.
+    Failures raise ApiError (method, URL, status and body) or RateLimited."""
     url = path if path.startswith("http") else API + path
     if params:
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
     attempts = 8 if method == "GET" else 1
     last_err = ""
     attempt = 0
+    waited = 0
     while attempt < attempts:
         req = urllib.request.Request(url, method=method)
         req.add_header("Authorization", f"Bearer {access_token()}")
@@ -200,14 +215,22 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
         try:
             with urllib.request.urlopen(req, data=data, timeout=30) as r:
                 raw = r.read()
-                return json.loads(raw) if raw else {}
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw)
+            except ValueError:
+                raise ApiError(f"{method} {url} -> {getattr(r, 'status', '2xx')} but the body is not JSON: {raw[:200]!r}") from None
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 # Rejected before processing, so retrying is safe for writes too; does not count as an attempt.
                 wait = _retry_after(e.headers)
                 if wait > 120:
                     raise RateLimited(wait) from None
-                print(f"\n  rate limited; sleeping {wait}s", file=sys.stderr)
+                if waited + wait > MAX_429_WAIT_S:
+                    raise RateLimited(wait, f"{method} {url} still throttled after {waited}s of waiting") from None
+                waited += wait
+                print(f"\n  {method} {url} -> 429; sleeping {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
             detail = e.read().decode(errors="replace")
@@ -217,19 +240,25 @@ def _call(method: str, path: str, params: dict | None = None, body: dict | None 
                 print(f"\n  {method} {url} -> {last_err}; retrying", file=sys.stderr)
                 time.sleep(2 * attempt)
                 continue
-            raise RuntimeError(f"{method} {url} -> {last_err}") from None
+            raise ApiError(f"{method} {url} -> {last_err}") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
             last_err = f"{type(e).__name__}: {e}"
             attempt += 1
             if attempt < attempts:
                 print(f"\n  {method} {url} -> {last_err}; retrying", file=sys.stderr)
                 time.sleep(2 * attempt)
-    raise RuntimeError(f"Giving up on {method} {url} after {attempts} attempt(s); last error: {last_err}")
+    raise ApiError(f"Giving up on {method} {url} after {attempts} attempt(s); last error: {last_err}")
+
+
+class ApiError(RuntimeError):
+    """A Spotify call failed for good (status, URL and body are in the message). Rerunning the
+    command is safe: every step re-reads its state and only does what is still missing."""
 
 
 class RateLimited(Exception):
-    def __init__(self, wait_s: int):
-        super().__init__(f"Spotify rate limit; retry after {wait_s / 3600:.1f} h")
+    def __init__(self, wait_s: int, note: str = ""):
+        when = f"{wait_s / 3600:.1f} h" if wait_s >= 3600 else f"{max(wait_s, 1) / 60:.0f} min" if wait_s >= 60 else f"{wait_s}s"
+        super().__init__(f"Spotify rate limit ({note}); retry after {when}" if note else f"Spotify rate limit; retry after {when}")
         self.wait_s = wait_s
 
 
@@ -278,6 +307,17 @@ def current_work() -> Path:
     if not marker.exists():
         sys.exit("Nothing exported yet. Run: python3 migrate.py export <ref>")
     return Path(marker.read_text().strip())
+
+
+def _load_json(path: Path, missing=None):
+    """Read a JSON file. A missing file returns `missing()` when a factory is given (else exits);
+    a corrupt or unreadable one exits naming the file, so the cause is never a bare traceback."""
+    if missing is not None and not path.exists():
+        return missing()
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        sys.exit(f"Cannot read {path}: {e}")
 
 
 def _total(p: dict) -> int:
@@ -629,7 +669,7 @@ def song_key(it: dict) -> str:
 
 
 def load_global() -> dict:
-    return json.loads(GLOBAL_APPROVALS.read_text()) if GLOBAL_APPROVALS.exists() else {}
+    return _load_json(GLOBAL_APPROVALS, missing=dict)
 
 
 def has_identity(it: dict) -> bool:
@@ -671,7 +711,8 @@ def known_matches() -> dict[str, dict]:
             continue
         try:
             src, cache = json.loads(sp.read_text()), json.loads(mp.read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            print(f"  WARNING: skipping {d.name} for match reuse, cannot read its files: {e}", file=sys.stderr)
             continue
         for it in src.get("items", []):
             if not it.get("is_local") or not has_identity(it):
@@ -809,15 +850,15 @@ def align_cache(src: dict, cache: dict, orphans: list[dict] | None = None) -> tu
 
 def load_state() -> tuple[Path, dict, dict]:
     wd = current_work()
-    src = json.loads((wd / "source.json").read_text())
-    cache = json.loads((wd / "matches.json").read_text()) if (wd / "matches.json").exists() else {}
+    src = _load_json(wd / "source.json")
+    cache = _load_json(wd / "matches.json", missing=dict)
     orphans: list[dict] = []
     backfilled, rekeyed, dropped = align_cache(src, cache, orphans)
     if rekeyed or dropped:
         print(f"  source changed since matching: {rekeyed} cached decision(s) moved, {dropped} dropped", file=sys.stderr)
     if orphans:
         op = wd / "matches.orphans.json"
-        old = json.loads(op.read_text()) if op.exists() else []
+        old = _load_json(op, missing=list)
         op.write_text(json.dumps(old + orphans, indent=1))
         print(f"  dropped entries kept in {op}", file=sys.stderr)
     if apply_global(src, cache) or backfilled or rekeyed or dropped:
@@ -989,7 +1030,7 @@ def cmd_verify(args) -> None:
     rp = wd / "result.json"
     if not rp.exists():
         sys.exit("No playlist built yet for this source.")
-    res = json.loads(rp.read_text())
+    res = _load_json(rp)
     v = verify_summary(src, cache, live_uris(res["playlist_id"]))
     print(f"Source '{src['name']}': {v['source_total']} songs ({v['searched']} searched so far)")
     print(f"New playlist {res['url']}: {v['live_spotify']} Spotify tracks + {v['live_local']} local files")
@@ -1216,7 +1257,7 @@ def cmd_build(args) -> None:
     result_path = wd / "result.json"
     update_ref = args.update
     if update_ref is None and result_path.exists() and not args.new:
-        update_ref = json.loads(result_path.read_text())["playlist_id"]
+        update_ref = _load_json(result_path)["playlist_id"]
 
     if update_ref:
         pl = resolve_playlist(update_ref)
@@ -1350,6 +1391,8 @@ def main() -> None:
         args.fn(args)
     except RateLimited as e:
         sys.exit(f"{e}. Progress so far is saved; try again later.")
+    except ApiError as e:
+        sys.exit(f"Spotify call failed: {e}\nProgress so far is saved; rerun the same command, it only does what is still missing.")
 
 
 if __name__ == "__main__":
