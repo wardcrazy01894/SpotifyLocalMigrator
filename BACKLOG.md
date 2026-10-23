@@ -9,10 +9,10 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 
 | Playlist | Songs | Spotify | Local | Result |
 |---|---|---|---|---|
-| Pry | 112 | 107 | 5 | https://open.spotify.com/playlist/034PA7UMN27PrxIpRDnI9Q — `verify` COMPLETE 2026-10-07 |
-| iPhone | 3262 | 3006 | 247 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — 9 collapsed duplicates; `verify` COMPLETE 2026-10-15 |
+| Pry | 112 | 108 | 4 | https://open.spotify.com/playlist/034PA7UMN27PrxIpRDnI9Q — `verify` COMPLETE 2026-10-22 |
+| iPhone | 3262 | 3007 | 245 | https://open.spotify.com/playlist/6RIfz6C47vRfneHYHXO5Sx — 9 collapsed duplicates, 1 dropped; `verify` COMPLETE 2026-10-22 |
 | Seven Deadly Beats | 60 | 48 | 12 | https://open.spotify.com/playlist/0o70onbuKAyfpIcfr83fab — `verify` COMPLETE 2026-10-15 |
-| Highway Bro Seshin | 85 | 82 | 3 | https://open.spotify.com/playlist/4IoL2tTGwc6bO7MCZy6o9g — `verify` COMPLETE 2026-10-15 |
+| Highway Bro Seshin | 85 | 83 | 2 | https://open.spotify.com/playlist/4IoL2tTGwc6bO7MCZy6o9g — `verify` COMPLETE 2026-10-22 |
 | Volleyball | 5 | 5 | 0 | https://open.spotify.com/playlist/3mjcko825vaHcWYGumZK54 — `verify` COMPLETE 2026-10-14 |
 | Clubbing | 53 | 33 | 19 | https://open.spotify.com/playlist/0IOofgcGmunhMLZ159VhfI — 1 collapsed duplicate; `verify` COMPLETE 2026-10-15 |
 | Songs I like now | 212 | 190 | 22 | https://open.spotify.com/playlist/5LbDULeHLazOgbaVAeRFBv — `verify` COMPLETE 2026-10-15 |
@@ -21,7 +21,10 @@ Finished playlists get dragged into the "Old iTunes playlists" folder by hand.
 | Pub | 61 | 52 | 9 | https://open.spotify.com/playlist/5BJzO9MJcxTVJh5muz4Oz6 — `verify` COMPLETE 2026-10-15 |
 | Semiformal | 37 | 37 | 0 | https://open.spotify.com/playlist/5rXLfE2ZO9nLS8ZhveX5ZF — `verify` COMPLETE 2026-10-14 |
 
-Totals: 3973 source songs → 3618 Spotify tracks + 345 local files + 10 collapsed duplicates.
+Totals: 3973 source songs → 3621 Spotify tracks + 341 local files + 10 collapsed duplicates + 1 dropped.
+2026-10-22: the owner swapped the local "Somewhere Over The Rainbow" for the Spotify track in all three
+playlists that had it (iPhone, Pry, Highway Bro Seshin) and removed "Walk On By" (Dionne Warwick) from
+iPhone, a file they never had locally; recorded with `approve --pos` / the new `approve --drop`.
 iPhone took 2026-10-08 to 2026-10-14 (daily search budget 423–492 songs plus a few
 re-searches before a 429); the other 9 playlists were built and decided on 2026-10-14 in one evening (verified 2026-10-14/15)
 because decisions and exact matches carry over (599 songs needed 106 searches).

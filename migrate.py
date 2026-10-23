@@ -7,7 +7,7 @@ Pipeline (each step is resumable and writes to ./work/<slug>/):
   export <ref>      dump the source playlist (incl. local files) -> source.json
   match [--limit N] search Spotify for each local track; strict matching -> matches.json
   build             create the new playlist, or bring the existing one up to date -> result.json
-  approve           approve flagged songs (by reason or position), keep-local, recheck, unkeep
+  approve           approve flagged songs (by reason or position), keep-local, drop, recheck, unkeep
   research          re-search one song by hand, or pick a specific track for it
   verify            prove every source song is accounted for in the new playlist
   report            re-print the breakdown and rewrite flagged.csv
@@ -600,11 +600,13 @@ def write_reports(wd: Path, src: dict, cache: dict, batch: str | None = None) ->
         v = m["verdict"]
         if m.get("keep_local"):
             v = "keep_local"
+        elif m.get("dropped"):
+            v = "dropped"
         elif m.get("approved"):
             v = "approved_" + v
         bucket = "recheck" if m.get("recheck") else v  # a recheck is open whatever the verdict was
         counts[bucket] = counts.get(bucket, 0) + 1
-        if bucket in ("match", "not_searched", "keep_local") or bucket.startswith("approved_"):
+        if bucket in ("match", "not_searched", "keep_local", "dropped") or bucket.startswith("approved_"):
             continue
         rows.append(
             {
@@ -660,7 +662,7 @@ GLOBAL_APPROVALS = WORK_ROOT / "approvals.json"
 
 def wanted(m: dict | None) -> bool:
     """Should this local track's candidate go into the new playlist? A recheck is open, not wanted."""
-    if not m or not m.get("uri") or m.get("keep_local") or m.get("recheck"):
+    if not m or not m.get("uri") or m.get("keep_local") or m.get("dropped") or m.get("recheck"):
         return False
     return m["verdict"] == "match" or m.get("approved") is True
 
@@ -684,7 +686,7 @@ def record_global(it: dict, m: dict, decision: str, playlist: str) -> None:
         return
     g = load_global()
     g[song_key(it)] = {
-        "decision": decision,  # approve | keep_local
+        "decision": decision,  # approve | keep_local | drop
         "uri": m.get("uri") if decision == "approve" else None,
         "title": it["title"],
         "artist": it["artist"],
@@ -790,12 +792,15 @@ def apply_global(src: dict, cache: dict) -> int:
     for it in src["items"]:
         m = cache.get(str(it["pos"]))
         d = g.get(song_key(it)) if has_identity(it) else None
-        if not m or not d or m.get("approved") is not None or m.get("keep_local") or m.get("recheck"):
+        if not m or not d or m.get("approved") is not None or m.get("keep_local") or m.get("dropped") or m.get("recheck"):
             continue  # a recheck stays open until research or an explicit approve resolves it
-        if m["verdict"] == "match" and d["decision"] != "keep_local":
+        if m["verdict"] == "match" and d["decision"] == "approve":
             continue
         if d["decision"] == "keep_local":
             m["keep_local"] = True
+            m["approved"] = False
+        elif d["decision"] == "drop":
+            m["dropped"] = True
             m["approved"] = False
         else:
             m["approved"] = True
@@ -868,18 +873,19 @@ def load_state() -> tuple[Path, dict, dict]:
 
 
 def cmd_approve(args) -> None:
-    """Mark flagged tracks as approved (added on next build) / keep-local / recheck, or unkeep a keep-local one."""
+    """Mark flagged tracks as approved (added on next build) / keep-local / dropped / recheck, or unkeep a keep-local or dropped one."""
     wd, src, cache = load_state()
     reasons = set(filter(None, (args.reasons or "").split(",")))
     positions = {int(x) for x in filter(None, (args.pos or "").split(","))}
     keep = {int(x) for x in filter(None, (args.keep_local or "").split(","))}
+    drop = {int(x) for x in filter(None, (args.drop or "").split(","))}
     recheck = {int(x) for x in filter(None, (args.recheck or "").split(","))}
     unkeep = {int(x) for x in filter(None, (args.unkeep or "").split(","))}
     changed = 0
-    overlap = unkeep & (keep | recheck | positions)
+    overlap = (unkeep & (keep | drop | recheck | positions)) | (drop & (keep | recheck | positions))
     if overlap:
-        sys.exit(f"--unkeep overlaps with another option for position(s) {sorted(overlap)}; run it as a separate command first")
-    asked = keep | recheck | positions | unkeep
+        sys.exit(f"--unkeep/--drop overlaps with another option for position(s) {sorted(overlap)}; run it as a separate command first")
+    asked = keep | drop | recheck | positions | unkeep
     known = {it["pos"] for it in src["items"] if str(it["pos"]) in cache}
     for pos in sorted(asked - known):
         print(f"  ignored #{pos}: not in the source, or not searched yet", file=sys.stderr)
@@ -888,8 +894,8 @@ def cmd_approve(args) -> None:
         if not m:
             continue
         if it["pos"] in unkeep:
-            if not m.get("keep_local"):
-                print(f"  ignored #{it['pos']}: not keep-local", file=sys.stderr)
+            if not m.get("keep_local") and not m.get("dropped"):
+                print(f"  ignored #{it['pos']}: not keep-local or dropped", file=sys.stderr)
                 continue
             forget_global(it)
             changed += 1
@@ -899,14 +905,25 @@ def cmd_approve(args) -> None:
                 print(f"  #{it['pos']} will be searched on the next match: {it['title']} — {it['artist']}")
             else:
                 m.pop("keep_local", None)
+                m.pop("dropped", None)
                 m.pop("approved", None)
                 print(f"  #{it['pos']} is open again: {it['title']} — {it['artist']}")
         elif it["pos"] in keep:
             m["approved"] = False
             m["keep_local"] = True
+            m.pop("dropped", None)
             m.pop("recheck", None)
             record_global(it, m, "keep_local", src["name"])
             changed += 1
+        elif it["pos"] in drop:
+            # leave the song out of the new playlist altogether: no Spotify track, no local file
+            m["approved"] = False
+            m["dropped"] = True
+            m.pop("keep_local", None)
+            m.pop("recheck", None)
+            record_global(it, m, "drop", src["name"])
+            changed += 1
+            print(f"  drop #{it['pos']}: {it['title']} — {it['artist']}  (left out of the new playlist)")
         elif it["pos"] in recheck:
             if m.get("keep_local"):
                 print(f"  ignored #{it['pos']}: keep-local (use --unkeep first)", file=sys.stderr)
@@ -926,9 +943,9 @@ def cmd_approve(args) -> None:
             explicit = it["pos"] in positions
             if m.get("recheck") and not explicit:
                 print(f"  skipped #{it['pos']}: marked recheck (name it with --pos to approve anyway)", file=sys.stderr)
-            elif m.get("keep_local"):
+            elif m.get("keep_local") or m.get("dropped"):
                 if explicit:
-                    print(f"  ignored #{it['pos']}: already keep-local (use --unkeep to reverse)", file=sys.stderr)
+                    print(f"  ignored #{it['pos']}: already {'keep-local' if m.get('keep_local') else 'dropped'} (use --unkeep to reverse)", file=sys.stderr)
             elif not m.get("uri"):
                 if explicit:
                     print(f"  ignored #{it['pos']}: no candidate to approve; use research --query/--pick", file=sys.stderr)
@@ -997,14 +1014,17 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
     """Pure part of `verify`. `live` is the new playlist's uri list in order (local files included).
 
     Done means: every source song is either a Spotify track that is present, a local file that
-    has been pasted in, or one of the collapsed duplicates; and nothing undecided remains."""
+    has been pasted in, one of the collapsed duplicates, or deliberately dropped; and nothing
+    undecided remains."""
     expected, dupes = desired_uris(src, cache, False)
     live_spotify = [u for u in live if u.startswith("spotify:track:")]
     live_local = {u for u in live if u.startswith("spotify:local:")}
     keep_local = [it for it in src["items"] if cache.get(str(it["pos"]), {}).get("keep_local")]
+    dropped = [it for it in src["items"] if cache.get(str(it["pos"]), {}).get("dropped")]
     unresolved = [
         it for it in src["items"]
-        if it["is_local"] and not wanted(cache.get(str(it["pos"]))) and not cache.get(str(it["pos"]), {}).get("keep_local")
+        if it["is_local"] and not wanted(cache.get(str(it["pos"])))
+        and not cache.get(str(it["pos"]), {}).get("keep_local") and not cache.get(str(it["pos"]), {}).get("dropped")
     ]
     live_set = set(live_spotify)
     missing_tracks = [u for u in expected if u not in live_set]
@@ -1022,6 +1042,7 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
         "missing_tracks": missing_tracks,
         "extra_tracks": extra_tracks,
         "keep_local": keep_local,
+        "dropped": dropped,
         "missing_local": missing_local,
         "extra_local": extra_local,
         "unresolved": unresolved,
@@ -1041,8 +1062,11 @@ def cmd_verify(args) -> None:
     v = verify_summary(src, cache, live_uris(res["playlist_id"]))
     print(f"Source '{src['name']}': {v['source_total']} songs ({v['searched']} searched so far)")
     print(f"New playlist {res['url']}: {v['live_spotify']} Spotify tracks + {v['live_local']} local files")
-    accounted = v["expected"] + len(v["keep_local"]) + v["dupes"]
-    print(f"  Decided so far: {v['expected']} Spotify + {len(v['keep_local'])} local + {v['dupes']} collapsed duplicate(s) = {accounted} of {v['source_total']}")
+    accounted = v["expected"] + len(v["keep_local"]) + v["dupes"] + len(v["dropped"])
+    dropped = f" + {len(v['dropped'])} dropped" if v["dropped"] else ""
+    print(f"  Decided so far: {v['expected']} Spotify + {len(v['keep_local'])} local + {v['dupes']} collapsed duplicate(s){dropped} = {accounted} of {v['source_total']}")
+    for it in v["dropped"][:20]:
+        print(f"    dropped on purpose: #{it['pos']} {it['title']} — {it['artist']}")
     if v["non_track"]:
         print(f"  Not carried over ({len(v['non_track'])} non-track item(s), e.g. podcast episodes):")
         for it in v["non_track"][:10]:
@@ -1376,8 +1400,9 @@ def main() -> None:
     ap.add_argument("--reasons", help="comma list: duration_mismatch,title_variant,artist_mismatch,no_match,no_duration")
     ap.add_argument("--pos", help="comma list of source positions (from flagged.csv)")
     ap.add_argument("--keep-local", help="comma list of positions to never add")
+    ap.add_argument("--drop", help="comma list of positions to leave out of the new playlist altogether (no track, no local file)")
     ap.add_argument("--recheck", help="comma list of positions to reopen for a re-search by hand (not built until resolved)")
-    ap.add_argument("--unkeep", help="comma list of keep-local positions to reopen (also forgets the standing decision)")
+    ap.add_argument("--unkeep", help="comma list of keep-local or dropped positions to reopen (also forgets the standing decision)")
     ap.set_defaults(fn=cmd_approve)
     rs = sub.add_parser("research", help="re-search one song with a custom query, or pick a specific track uri")
     rs.add_argument("--pos", type=int, required=True, help="source position (the # in flagged.csv)")
