@@ -598,10 +598,8 @@ def write_reports(wd: Path, src: dict, cache: dict, batch: str | None = None) ->
             continue
         m = cache.get(str(it["pos"]), {"verdict": "not_searched"})
         v = m["verdict"]
-        if m.get("keep_local"):
-            v = "keep_local"
-        elif m.get("dropped"):
-            v = "dropped"
+        if overridden(m):
+            v = overridden(m)
         elif m.get("approved"):
             v = "approved_" + v
         bucket = "recheck" if m.get("recheck") else v  # a recheck is open whatever the verdict was
@@ -660,9 +658,21 @@ def write_reports(wd: Path, src: dict, cache: dict, batch: str | None = None) ->
 GLOBAL_APPROVALS = WORK_ROOT / "approvals.json"
 
 
+def overridden(m: dict | None) -> str | None:
+    """The owner's standing veto on this entry, if any: "keep_local" (their file stays, no track)
+    or "dropped" (left out altogether). Either one settles the song until `approve --unkeep`."""
+    if not m:
+        return None
+    if m.get("keep_local"):
+        return "keep_local"
+    if m.get("dropped"):
+        return "dropped"
+    return None
+
+
 def wanted(m: dict | None) -> bool:
     """Should this local track's candidate go into the new playlist? A recheck is open, not wanted."""
-    if not m or not m.get("uri") or m.get("keep_local") or m.get("dropped") or m.get("recheck"):
+    if not m or not m.get("uri") or overridden(m) or m.get("recheck"):
         return False
     return m["verdict"] == "match" or m.get("approved") is True
 
@@ -703,7 +713,7 @@ def known_matches() -> dict[str, dict]:
 
     An exact match depends only on the song's title, artist and length, so the same file in
     another playlist needs no search. Read from every work dir's source.json + matches.json,
-    nothing extra to maintain. Entries the owner has since overridden (keep-local, recheck)
+    nothing extra to maintain. Entries the owner has since overridden (keep-local, dropped, recheck)
     or that belong to a different song than their position now holds are skipped."""
     out: dict[str, dict] = {}
     if not WORK_ROOT.is_dir():
@@ -721,7 +731,7 @@ def known_matches() -> dict[str, dict]:
             if not it.get("is_local") or not has_identity(it):
                 continue
             m = cache.get(str(it["pos"]))
-            if not m or m.get("verdict") != "match" or not m.get("uri") or m.get("keep_local") or m.get("recheck"):
+            if not m or m.get("verdict") != "match" or not m.get("uri") or overridden(m) or m.get("recheck"):
                 continue
             if m.get("carried_from"):
                 continue  # only real search results seed reuse; a copy may be stale after a recheck/research elsewhere
@@ -774,6 +784,8 @@ def carry_unsearched(src: dict, cache: dict, todo: list[dict], batch: str) -> tu
         }
         if d["decision"] == "keep_local":
             m["keep_local"], m["approved"] = True, False
+        elif d["decision"] == "drop":
+            m["dropped"], m["approved"] = True, False
         else:
             m["approved"] = True
         cache[str(it["pos"])] = m
@@ -792,7 +804,7 @@ def apply_global(src: dict, cache: dict) -> int:
     for it in src["items"]:
         m = cache.get(str(it["pos"]))
         d = g.get(song_key(it)) if has_identity(it) else None
-        if not m or not d or m.get("approved") is not None or m.get("keep_local") or m.get("dropped") or m.get("recheck"):
+        if not m or not d or m.get("approved") is not None or overridden(m) or m.get("recheck"):
             continue  # a recheck stays open until research or an explicit approve resolves it
         if m["verdict"] == "match" and d["decision"] == "approve":
             continue
@@ -882,9 +894,10 @@ def cmd_approve(args) -> None:
     recheck = {int(x) for x in filter(None, (args.recheck or "").split(","))}
     unkeep = {int(x) for x in filter(None, (args.unkeep or "").split(","))}
     changed = 0
-    overlap = (unkeep & (keep | drop | recheck | positions)) | (drop & (keep | recheck | positions))
+    groups = [positions, keep, drop, recheck, unkeep]
+    overlap = {pos for i, a in enumerate(groups) for b in groups[i + 1:] for pos in a & b}
     if overlap:
-        sys.exit(f"--unkeep/--drop overlaps with another option for position(s) {sorted(overlap)}; run it as a separate command first")
+        sys.exit(f"position(s) {sorted(overlap)} given to more than one option; run them as separate commands")
     asked = keep | drop | recheck | positions | unkeep
     known = {it["pos"] for it in src["items"] if str(it["pos"]) in cache}
     for pos in sorted(asked - known):
@@ -894,7 +907,7 @@ def cmd_approve(args) -> None:
         if not m:
             continue
         if it["pos"] in unkeep:
-            if not m.get("keep_local") and not m.get("dropped"):
+            if not overridden(m):
                 print(f"  ignored #{it['pos']}: not keep-local or dropped", file=sys.stderr)
                 continue
             forget_global(it)
@@ -925,8 +938,8 @@ def cmd_approve(args) -> None:
             changed += 1
             print(f"  drop #{it['pos']}: {it['title']} — {it['artist']}  (left out of the new playlist)")
         elif it["pos"] in recheck:
-            if m.get("keep_local"):
-                print(f"  ignored #{it['pos']}: keep-local (use --unkeep first)", file=sys.stderr)
+            if overridden(m):
+                print(f"  ignored #{it['pos']}: {overridden(m).replace('_', '-')} (use --unkeep first)", file=sys.stderr)
                 continue
             m["recheck"] = True
             m.pop("approved", None)  # open again: not built until research or an explicit approve resolves it
@@ -943,9 +956,9 @@ def cmd_approve(args) -> None:
             explicit = it["pos"] in positions
             if m.get("recheck") and not explicit:
                 print(f"  skipped #{it['pos']}: marked recheck (name it with --pos to approve anyway)", file=sys.stderr)
-            elif m.get("keep_local") or m.get("dropped"):
+            elif overridden(m):
                 if explicit:
-                    print(f"  ignored #{it['pos']}: already {'keep-local' if m.get('keep_local') else 'dropped'} (use --unkeep to reverse)", file=sys.stderr)
+                    print(f"  ignored #{it['pos']}: already {overridden(m).replace('_', '-')} (use --unkeep to reverse)", file=sys.stderr)
             elif not m.get("uri"):
                 if explicit:
                     print(f"  ignored #{it['pos']}: no candidate to approve; use research --query/--pick", file=sys.stderr)
@@ -975,6 +988,9 @@ def cmd_research(args) -> None:
     if not it["is_local"]:
         sys.exit(f"#{args.pos} is already a Spotify track; nothing to research.")
     m = cache.get(str(it["pos"]), {})
+    if overridden(m):
+        # a new result would replace the entry, but the standing rule would put the veto straight back
+        sys.exit(f"#{it['pos']} is {overridden(m).replace('_', '-')}; run `approve --unkeep {it['pos']}` first")
     print(f"#{it['pos']}: {it['title']} — {it['artist']} {fmt_dur(it['duration_ms'])}")
     if args.pick:
         tid = track_id(args.pick)
@@ -1019,13 +1035,18 @@ def verify_summary(src: dict, cache: dict, live: list[str]) -> dict:
     expected, dupes = desired_uris(src, cache, False)
     live_spotify = [u for u in live if u.startswith("spotify:track:")]
     live_local = {u for u in live if u.startswith("spotify:local:")}
-    keep_local = [it for it in src["items"] if cache.get(str(it["pos"]), {}).get("keep_local")]
-    dropped = [it for it in src["items"] if cache.get(str(it["pos"]), {}).get("dropped")]
-    unresolved = [
-        it for it in src["items"]
-        if it["is_local"] and not wanted(cache.get(str(it["pos"])))
-        and not cache.get(str(it["pos"]), {}).get("keep_local") and not cache.get(str(it["pos"]), {}).get("dropped")
-    ]
+    keep_local: list[dict] = []
+    dropped: list[dict] = []
+    unresolved: list[dict] = []
+    for it in src["items"]:
+        m = cache.get(str(it["pos"]))
+        veto = overridden(m)
+        if veto == "keep_local":
+            keep_local.append(it)
+        elif veto == "dropped":
+            dropped.append(it)
+        elif it["is_local"] and not wanted(m):
+            unresolved.append(it)
     live_set = set(live_spotify)
     missing_tracks = [u for u in expected if u not in live_set]
     extra_tracks = sorted(live_set - set(expected))
@@ -1396,7 +1417,7 @@ def main() -> None:
     mt.add_argument("--limit", type=int, help="search at most this many new songs (daily budget is roughly 400-480 songs)")
     mt.set_defaults(fn=cmd_match)
 
-    ap = sub.add_parser("approve", help="approve flagged tracks for adding, or mark them keep-local")
+    ap = sub.add_parser("approve", help="approve flagged tracks for adding, mark them keep-local or dropped, reopen them (recheck/unkeep)")
     ap.add_argument("--reasons", help="comma list: duration_mismatch,title_variant,artist_mismatch,no_match,no_duration")
     ap.add_argument("--pos", help="comma list of source positions (from flagged.csv)")
     ap.add_argument("--keep-local", help="comma list of positions to never add")
