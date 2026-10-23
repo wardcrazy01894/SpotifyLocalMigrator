@@ -90,6 +90,9 @@ class Wanted(unittest.TestCase):
         self.assertFalse(mg.wanted({"verdict": "match", "uri": None}))
         self.assertFalse(mg.wanted(None))
 
+    def test_dropped_is_not_wanted(self):
+        self.assertFalse(mg.wanted({"verdict": "match", "uri": "spotify:track:a", "dropped": True}))
+
     def test_recheck_is_open_not_wanted(self):
         self.assertFalse(mg.wanted({"verdict": "match", "uri": "spotify:track:a", "recheck": True}))
         self.assertFalse(mg.wanted({"verdict": "title_variant", "uri": "spotify:track:a", "approved": True, "recheck": True}))
@@ -338,6 +341,17 @@ class VerifySummary(unittest.TestCase):
         self.assertEqual(v["extra_local"], [SRC["items"][2]["uri"]])
         self.assertFalse(v["complete"])
 
+    def test_dropped_song_is_decided_and_not_expected(self):
+        cache = {k: dict(v) for k, v in CACHE.items()}
+        cache["5"] = {"verdict": "no_match", "uri": "spotify:track:Y", "dropped": True, "approved": False}
+        live = ["spotify:track:R0", "spotify:track:A", "spotify:track:B", SRC["items"][4]["uri"]]
+        v = mg.verify_summary(SRC, cache, live)
+        self.assertTrue(v["complete"])
+        self.assertEqual([it["pos"] for it in v["dropped"]], [5])
+        self.assertEqual(v["unresolved"], [])
+        self.assertNotIn("spotify:track:Y", v["missing_tracks"])
+        self.assertEqual(v["expected"] + len(v["keep_local"]) + v["dupes"] + len(v["dropped"]), v["source_total"])
+
     def test_rechecked_song_is_unresolved(self):
         cache = {k: dict(v) for k, v in CACHE.items()}
         cache["1"]["recheck"] = True
@@ -464,6 +478,16 @@ class GlobalDecisions(unittest.TestCase):
         self.assertTrue(cache["2"]["keep_local"])
         self.assertFalse(mg.wanted(cache["2"]))
 
+    def test_carry_unsearched_carries_a_drop_as_dropped(self):
+        it = local(1, "A", "a", 100)
+        mg.record_global(it, {"uri": None}, "drop", "Other")
+        cache = {}
+        rest, decided, matched = mg.carry_unsearched({"items": [it]}, cache, [it], "2026-01-01")
+        self.assertEqual((rest, decided, matched), ([], 1, 0))
+        self.assertTrue(cache["1"]["dropped"])
+        self.assertFalse(cache["1"]["approved"])
+        self.assertFalse(mg.wanted(cache["1"]))
+
     def test_keep_local_elsewhere_overrides_auto_match(self):
         it = local(1, "A", "a", 100)
         mg.record_global(it, {"uri": None}, "keep_local", "Other")
@@ -477,6 +501,14 @@ class GlobalDecisions(unittest.TestCase):
         mg.GLOBAL_APPROVALS.write_text(json.dumps({mg.song_key(it): {"decision": "keep_local", "uri": None, "from_playlist": "P"}}))
         self.assertEqual(mg.carry_unsearched({"items": [it]}, {}, [it], "d"), ([it], 0, 0))
         self.assertEqual(mg.apply_global({"items": [it]}, {"1": {"verdict": "no_match", "uri": None}}), 0)
+
+    def test_drop_elsewhere_applies_even_to_a_match(self):
+        it = local(1, "A", "a", 100)
+        mg.record_global(it, {"uri": None}, "drop", "Other")
+        cache = {"1": {"verdict": "match", "uri": "spotify:track:A"}}
+        self.assertEqual(mg.apply_global({"items": [it]}, cache), 1)
+        self.assertTrue(cache["1"]["dropped"])
+        self.assertFalse(mg.wanted(cache["1"]))
 
     def test_approve_elsewhere_does_not_touch_a_match(self):
         it = local(1, "A", "a", 100)
@@ -685,7 +717,7 @@ class ApproveCommand(unittest.TestCase):
 
     def _args(self, **kw):
         import argparse
-        base = {"reasons": None, "pos": None, "keep_local": None, "recheck": None, "unkeep": None, "batch": None}
+        base = {"reasons": None, "pos": None, "keep_local": None, "drop": None, "recheck": None, "unkeep": None, "batch": None}
         base.update(kw)
         return argparse.Namespace(**base)
 
@@ -703,6 +735,69 @@ class ApproveCommand(unittest.TestCase):
         with self.quiet:
             mg.cmd_approve(self._args(unkeep="1"))
         self.assertNotIn("1", self._cache())
+
+    def test_drop_leaves_song_out_and_records_standing_rule(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(drop="2"))
+        c = self._cache()
+        self.assertTrue(c["2"]["dropped"])
+        self.assertFalse(mg.wanted(c["2"]))
+        self.assertEqual(mg.load_global()[mg.song_key(self.src["items"][2])]["decision"], "drop")
+        # a dropped song is settled: approving it by reason is a no-op
+        with self.quiet:
+            mg.cmd_approve(self._args(reasons="duration_mismatch"))
+        self.assertTrue(self._cache()["2"]["dropped"])
+        self.assertFalse(self._cache()["2"].get("approved"))
+
+    def test_drop_replaces_keep_local_and_unkeep_reopens_it(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(drop="0"))
+        c = self._cache()
+        self.assertTrue(c["0"]["dropped"])
+        self.assertNotIn("keep_local", c["0"])
+        with self.quiet:
+            mg.cmd_approve(self._args(unkeep="0"))
+        c = self._cache()
+        self.assertNotIn("dropped", c["0"])
+        self.assertNotIn(mg.song_key(self.src["items"][0]), mg.load_global())
+
+    def test_drop_overlapping_another_option_is_refused(self):
+        with self.assertRaises(SystemExit), self.quiet:
+            mg.cmd_approve(self._args(drop="2", pos="2"))
+        self.assertNotIn("dropped", self._cache()["2"])
+
+    def test_any_two_options_naming_the_same_position_are_refused(self):
+        with self.assertRaises(SystemExit), self.quiet:
+            mg.cmd_approve(self._args(keep_local="2", recheck="2"))
+        self.assertNotIn("keep_local", self._cache()["2"])
+        self.assertNotIn("recheck", self._cache()["2"])
+
+    def test_recheck_on_dropped_is_refused(self):
+        with self.quiet:
+            mg.cmd_approve(self._args(drop="2"))
+        err = io.StringIO()
+        with self.quiet, contextlib.redirect_stderr(err):
+            mg.cmd_approve(self._args(recheck="2"))
+        c = self._cache()["2"]
+        self.assertTrue(c["dropped"])
+        self.assertNotIn("recheck", c)
+        self.assertIn("ignored #2: dropped", err.getvalue())
+
+    def test_research_on_a_vetoed_song_is_refused_before_any_search(self):
+        calls = []
+        orig = mg.api_get
+        mg.api_get = lambda *a, **k: calls.append(a) or {}
+        try:
+            with self.quiet:
+                mg.cmd_approve(self._args(drop="2"))
+            for pos in (0, 2):  # keep-local and dropped alike
+                with self.assertRaises(SystemExit), self.quiet:
+                    mg.cmd_research(argparse.Namespace(pos=pos, query="x", pick=None, take=False))
+        finally:
+            mg.api_get = orig
+        self.assertEqual(calls, [])
+        self.assertTrue(self._cache()["2"]["dropped"])
+        self.assertTrue(self._cache()["0"]["keep_local"])
 
     def test_unkeep_overlapping_another_option_is_refused(self):
         with self.assertRaises(SystemExit), self.quiet:
@@ -830,7 +925,8 @@ class CarryKnownMatches(unittest.TestCase):
     def test_known_matches_collects_only_clean_exact_matches(self):
         items = [local(0, "Good", "g", 200), local(1, "Kept", "k", 200), local(2, "Recheck", "r", 200),
                  local(3, "Flagged", "f", 200), local(4, "NoUri", "n", 200), local(5, "Moved", "m", 200),
-                 local(6, "", "", 200), local(7, "Copy", "c", 200), local(8, "Legacy", "l", 200)]
+                 local(6, "", "", 200), local(7, "Copy", "c", 200), local(8, "Legacy", "l", 200),
+                 local(9, "Dropped", "d", 200)]
         self._playlist("p", "P", items, {
             "0": self._match(items[0], "spotify:track:good"),
             "1": self._match(items[1], "spotify:track:kept", keep_local=True),
@@ -841,6 +937,7 @@ class CarryKnownMatches(unittest.TestCase):
             "6": self._match(items[6], "spotify:track:anon"),
             "7": self._match(items[7], "spotify:track:copy", carried_from="Elsewhere"),  # a copy, not a search result
             "8": {k: v for k, v in self._match(items[8], "spotify:track:old").items() if k != "key"},  # pre-key entry
+            "9": self._match(items[9], "spotify:track:dropped", dropped=True),
         })
         known = mg.known_matches()
         self.assertEqual(set(known), {mg.song_key(items[0])})

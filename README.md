@@ -98,11 +98,12 @@ Open `work/<playlist>/flagged.csv`. Each row has your file, the closest Spotify 
 python3 migrate.py approve --reasons title_variant          # "(feat. X)" vs "feat. X"? fine, take them all
 python3 migrate.py approve --pos 37,134                      # these two specifically
 python3 migrate.py approve --keep-local 141                  # never add this one, I like my version
+python3 migrate.py approve --drop 98                          # leave this one out entirely (no track, no local file)
 python3 migrate.py approve --recheck 211,223                 # wrong track: reopen (not built, standing decision forgotten) until research/approve --pos
 python3 migrate.py research --pos 211 --query "I See Fire Kygo remix"   # …like this; stores it if exact
 python3 migrate.py research --pos 211 --query "…" --take    # or take the top result anyway
 python3 migrate.py research --pos 223 --pick spotify:track:…  # or name the track yourself
-python3 migrate.py approve --unkeep 141                      # changed my mind, reopen it
+python3 migrate.py approve --unkeep 141                      # changed my mind (keep-local or drop), reopen it
 python3 migrate.py build                                     # bring the playlist up to date, same URL
 python3 migrate.py verify                                    # are we done yet?
 python3 migrate.py report --batch 2026-10-07                 # re-print the breakdown; also rewrite that day's flagged_<date>.csv
